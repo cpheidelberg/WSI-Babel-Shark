@@ -212,20 +212,29 @@ If you use this tool, please cite:
 > Computational Pathology Section, Institute of Pathology, Heidelberg University (2025).
 
 ---
+## Authors & Supervision
 
-## Authors
+## - Shahram Aliyari (First Author)
+Computational Pathology Group, Institute of Pathology Heidelberg
+📧 aliyari.shahram@uni-heidelberg.de
 
-**Shahram Aliyari**  
-Computational Pathology, Institute of Pathology Heidelberg  
-📧 aliyari.shahram@uni-heidelberg.de  
-📧 aliyari.shahram@gmail.com  
+Concept, implementation, and manuscript preparation
 
-**Supervisor:**  
-**Dr. Cleo-Aron Weis** — cleo-aron.weis@uni-heidelberg.de  
+## - Maximilian Wagner (Co-Author)
+Computational Pathology Group, Institute of Pathology Heidelberg
+📧 maximilian.wagner@uni-heidelberg.de
+
+Technical contributions, testing, and validation
+
+## - Dr. Cleo-Aron Weis (Supervisor & Corresponding Author)
+Computational Pathology Group, Institute of Pathology Heidelberg
+📧 cleo-aron.weis@uni-heidelberg.de
+
+Project supervision, critical review, and correspondence
 
 ---
 
-## 📄 License
+## License
 Released under the **MIT License**.
 
 ---
