@@ -214,23 +214,20 @@ If you use this tool, please cite:
 ---
 ## Authors & Supervision
 
-## - Shahram Aliyari (First Author)
+# Shahram Aliyari (First Author)
 Computational Pathology Group, Institute of Pathology Heidelberg
 📧 aliyari.shahram@uni-heidelberg.de
+Project concept, core implementation, and manuscript preparation
 
-Concept, implementation, and manuscript preparation
-
-## - Maximilian Wagner (Co-Author)
+# Maximilian Wagner (Co-Author)
 Computational Pathology Group, Institute of Pathology Heidelberg
 📧 maximilian.wagner@uni-heidelberg.de
+Contributed to early code development, testing, and documentation
 
-Technical contributions, testing, and validation
-
-## - Dr. Cleo-Aron Weis (Supervisor & Corresponding Author)
+# Dr. Cleo-Aron Weis (Supervisor & Corresponding Author)
 Computational Pathology Group, Institute of Pathology Heidelberg
 📧 cleo-aron.weis@uni-heidelberg.de
-
-Project supervision, critical review, and correspondence
+Project supervision, conceptual guidance, and critical review
 
 ---
 
