@@ -1,0 +1,9 @@
+services:
+  pipeline:
+    image: wsi-babel-shark:latest
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      - TZ=Europe/Berlin
+    command: ["--help"]

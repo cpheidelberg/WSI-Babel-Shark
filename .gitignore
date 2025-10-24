@@ -1,0 +1,47 @@
+cat > .gitignore <<'EOF'
+# --- Python cache/build ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# --- Virtual environments ---
+.venv/
+venv/
+
+# --- IDE/OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Project outputs (do NOT version huge or sensitive data) ---
+output/**              # logs, csv, sqlite, xlsx (pipeline products)
+!output/.gitkeep
+
+data/**                # raw slides & derived copies
+!data/.gitkeep         # keep folder structure only
+
+# Large slide formats
+*.svs
+*.ndpi
+*.tif
+*.tiff
+*.png
+*.jpg
+*.jpeg
+
+# Models & ROI sets (if you don’t want to track them)
+model/**
+!model/.gitkeep
+roiset/**
+!roiset/.gitkeep
+
+# Docker local files
+*.local
+EOF
+
+# keep folders in the repo (empty placeholders)
+mkdir -p data output model roiset docs/figures
+touch data/.gitkeep output/.gitkeep model/.gitkeep roiset/.gitkeep docs/figures/.gitkeep

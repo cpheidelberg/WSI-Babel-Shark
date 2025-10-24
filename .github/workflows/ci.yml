@@ -1,0 +1,76 @@
+# ==============================================================
+# Continuous Integration (CI) for WSI-Babel-Shark
+# --------------------------------------------------------------
+# This workflow automatically runs all lightweight tests (unit + CLI)
+# on each push or pull request to ensure code stability.
+# ==============================================================
+name: CI
+
+on:
+  push:
+    branches: [ main ]          # Trigger when code is pushed to 'main' branch
+  pull_request:
+    branches: [ main ]          # Trigger for pull requests targeting 'main'
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest      # Use the latest Ubuntu runner provided by GitHub
+
+    steps:
+      # ---------------------------------------------------------
+      # Step 1: Checkout the repository source code
+      # ---------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------
+      # Step 2: Set up Python environment
+      # ---------------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # You can add more versions later using a matrix
+
+      # ---------------------------------------------------------
+      # Step 3: Cache pip packages to speed up repeated runs
+      # ---------------------------------------------------------
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # ---------------------------------------------------------
+      # Step 4: Install dependencies and testing tools
+      # ---------------------------------------------------------
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .              # Install the project in editable mode
+          pip install pytest            # Install pytest
+          # Optional: enable code coverage reporting
+          # pip install pytest-cov
+
+      # ---------------------------------------------------------
+      # Step 5: Run fast tests (unit + CLI)
+      # ---------------------------------------------------------
+      - name: Run fast tests (unit + CLI)
+        run: |
+          echo "=== Running unit and CLI tests ==="
+          pytest -m "unit or cli" -q
+
+          # Optional: Run with coverage to measure code test coverage
+          # pytest -m "unit or cli" --cov=babel_shark --cov-report=term-missing -q
+
+      # ---------------------------------------------------------
+      # Step 6 (optional): Run the full test suite
+      # ---------------------------------------------------------
+      # Uncomment this block if you want CI to execute all tests (including integration)
+      # Note: this may take longer or require large datasets.
+      #
+      # - name: Run full test suite
+      #   run: |
+      #     echo "=== Running full test suite (all marks) ==="
+      #     pytest -q
