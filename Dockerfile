@@ -1,53 +1,83 @@
-# =====================================================
-# Dockerfile — WSI-Babel-Shark Pipeline (CPU)
-# Base: slim Python + system libs for OpenCV, OpenSlide, DataMatrix, PDF
-# =====================================================
+# Step 1: Lightweight Python base image
+FROM python:3.12-slim
 
-# --- 1) Base image ---
-FROM python:3.11-slim
+# Step 2: System dependencies for OpenSlide, OpenCV, Tesseract, etc.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        libgl1 \
+        openslide-tools \
+        libopenslide0 \
+        tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
 
-# --- 2) System dependencies ---
-# Required for:
-# - OpenCV (image I/O)
-# - OpenSlide (.svs / .ndpi reading)
-# - DataMatrix decoding (libdmtx0t64)
-# - PDF generation (ReportLab)
-# - Image codecs (JPEG, TIFF, JP2)
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
-    libgl1 \
-    libjpeg62-turbo \
-    libopenjp2-7 \
-    libtiff6 \
-    libopenslide0 \
-    openslide-tools \
-    libdmtx0t64 \
-    ca-certificates \
- && rm -rf /var/lib/apt/lists/*
-
-# --- 3) Python runtime hygiene ---
+# Step 3: Python runtime settings
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# --- 4) Working directory ---
+# Step 4: Create non-root user
+RUN useradd -ms /bin/bash babelshark
+
+# Step 5: Application working directory
 WORKDIR /app
 
-# --- 5) Install Python dependencies first (for better caching) ---
-COPY requirements.txt /app/requirements.txt
-RUN python -m pip install --no-cache-dir --upgrade pip \
- && python -m pip install --no-cache-dir -r requirements.txt
+# Step 6: Copy project metadata, source, and assets
+COPY pyproject.toml /app/
+COPY src /app/src
+COPY config /app/config
+COPY model /app/model
+COPY roiset /app/roiset
 
-# --- 6) Copy project source code ---
-COPY . /app
+# Step 7: Install Python dependencies
 
-# --- 7) Make src importable ---
-ENV PYTHONPATH=/app/src
+# 7.a) Upgrade pip
+RUN pip install --no-cache-dir --upgrade pip
 
-# --- 8) Default entrypoint for the pipeline ---
+# 7.b) Install PyTorch + torchvision (CPU wheels)
+RUN pip install --no-cache-dir \
+      torch \
+      torchvision \
+      --index-url https://download.pytorch.org/whl/cpu
+
+# 7.c) Install other third-party dependencies
+RUN pip install --no-cache-dir \
+      numpy \
+      pandas \
+      pyyaml \
+      pillow \
+      openslide-python \
+      opencv-python-headless \
+      pylibdmtx \
+      easyocr \
+      reportlab \
+      tqdm \
+      rapidfuzz \
+      openpyxl \
+      XlsxWriter \
+      scikit-learn \
+      matplotlib \
+      seaborn
+
+# 7.d) Install the WSI-Babel-Shark package itself
+RUN pip install --no-cache-dir /app
+
+# Step 8: Create runtime directories for data and config
+RUN mkdir -p /data/input /data/output /config && \
+    chown -R babelshark:babelshark /app /data /config
+
+# Step 9: Switch to non-root user
+USER babelshark
+
+# Step 10: Runtime working directory (host volumes will be mounted here)
+WORKDIR /data
+
+# Step 11: Default config path (can be overridden by CLI or ENV)
+ENV BABEL_SHARK_CONFIG=/config/config.docker.yaml
+
+# Step 12: Entrypoint – unified CLI
 ENTRYPOINT ["python", "-m", "babel_shark.cli"]
-
-# --- 9) Default command (runs when no args given) ---
 CMD ["--help"]

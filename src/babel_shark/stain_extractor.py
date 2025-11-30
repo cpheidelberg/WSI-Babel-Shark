@@ -10,13 +10,13 @@ ambiguous or exactly "H&E".
 Main features:
     OCR-based stain detection using EasyOCR
     Supports composite stains (A+B) and replacements
-    ROI fallback via roi_fallback_cli integration
+    ROI fallback via roi_metadata_extractor.py integration
     Generates PDF summary and Excel/CSV outputs atomically
     Command-line interface for run, validate, and version
 
 Usage:
-    PYTHONPATH=./src python -u src/stain_extractor.py run \
-        --config ./config/config.empty.yaml
+    PYTHONPATH=./src/babel_shark python -u src/babel_shark/stain_extractor.py run \
+        --config ./config/config.yaml
 """
 
 from __future__ import annotations
@@ -101,8 +101,8 @@ class AppConfig:
             run_output_dir=output_base,
             output_run_dir=run_dir,
             label_crops_dir=Path(cfg.get("label_crops_dir")),
-            stain_list_path=Path(cfg.get("stain_list_path", "./stain.dictionary.json")),
-            stain_replace_map_path=Path(cfg.get("stain_replace_map_path", "./stain.replacements.json")),
+            stain_list_path=Path(cfg.get("stain_list_path", "./stain_list.json")),
+            stain_replace_map_path=Path(cfg.get("stain_replace_map_path", "./stain_error_replacements.json")),
             roi_pxl_offset=int(cfg.get("roi_pxl_offset", 2)),
             roi_debug_dir=str(cfg.get("roi_debug_dir", "")),
             log_level=str(cfg.get("log_level", "INFO")),
@@ -367,7 +367,7 @@ def find_exact_stain(tokens: Sequence[str], stain_ref: Dict[str, str] | List[str
 def run_roi_fallback_cli_for_single_image(cfg: AppConfig,
                                           image_path: Path,
                                           log_level: str = "INFO") -> Optional[Dict[str, Any]]:
-    """Call roi_fallback_cli.py for exactly one image by staging it into a temp dir.
+    """Call roi_metadata_extractor.py for exactly one image by staging it into a temp dir.
 
     Args:
         cfg: Loaded application config.
@@ -377,9 +377,9 @@ def run_roi_fallback_cli_for_single_image(cfg: AppConfig,
     Returns:
         First-row dict from the produced ROI CSV for this image, or None on failure.
     """
-    cli_path = Path(__file__).resolve().parent / "roi_fallback_cli.py"
+    cli_path = Path(__file__).resolve().parent / "roi_metadata_extractor.py"
     if not cli_path.exists():
-        logging.info("[ROI][SKIP] roi_fallback_cli.py not found: %s", cli_path)
+        logging.info("[ROI][SKIP] roi_metadata_extractor.py not found: %s", cli_path)
         return None
 
     # Choose a realistic config path: prefer temp_config_roi.yaml if exists, else temp_config.yaml
@@ -540,27 +540,21 @@ def ocr_crop(image: Any) -> Any:
     return image[0:y_end, x_start:w]
 
 
-def detect_stain_for_image(image_path: Path,
-                           reader: easyocr.Reader,
-                           stain_dict: Dict[str, str] | List[str],
-                           replacements: Dict[str, str],
-                           cfg: AppConfig) -> Dict[str, Any]:
-    """Run OCR + rules; if initial stain is exactly H&E, run ROI fallback via CLI.
+def detect_stain_for_image(
+    image_path: Path,
+    reader: easyocr.Reader,
+    stain_dict: Dict[str, str] | List[str],
+    replacements: Dict[str, str],
+    cfg: AppConfig,
+) -> Dict[str, Any]:
+    """Run OCR + rules; if initial stain is exactly H&E, run ROI fallback via CLI."""
 
-    Args:
-        image_path: Path to input image.
-        reader: EasyOCR reader.
-        stain_dict: Canonical stains dict/list.
-        replacements: Token-level replacements.
-        cfg: Loaded config.
-
-    Returns:
-        Record dict with fields matching original schema.
-    """
+    # ---- Load image ----
     image = cv2.imread(str(image_path))
     if image is None:
         raise RuntimeError("Image could not be loaded.")
 
+    # ---- OCR on cropped region ----
     cropped = ocr_crop(image)
     cropped_rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
     raw_words: List[str] = reader.readtext(cropped_rgb, detail=0)
@@ -568,26 +562,41 @@ def detect_stain_for_image(image_path: Path,
     cleaned_words = tokenize_raw_words(raw_words)
     corrected_words = apply_replacements(cleaned_words, replacements)
 
-    # Composite via '+'
+    # ---- Stain detection from OCR tokens ----
+    # 1) Composite via '+'
     composite_stain, composite_src = detect_plus_pair(corrected_words, stain_dict)
     if composite_stain:
         matched_stain = composite_stain
         matched_word = composite_src
-        logging.info("[INIT] %s -> Composite Stain via '+': '%s' (from '%s')",
-                     image_path.name, matched_stain, matched_word)
+        logging.info(
+            "[INIT] %s -> Composite Stain via '+': '%s' (from '%s')",
+            image_path.name,
+            matched_stain,
+            matched_word,
+        )
     else:
-        # Two valid stains without '+'
+        # 2) Two valid stains without '+'
         pair_stain, pair_src = detect_two_valid_stains(corrected_words, stain_dict)
         if pair_stain:
             matched_stain = pair_stain
             matched_word = pair_src
-            logging.info("[INIT] %s -> Multi-token Stain: '%s' (from '%s')",
-                         image_path.name, matched_stain, matched_word)
+            logging.info(
+                "[INIT] %s -> Multi-token Stain: '%s' (from '%s')",
+                image_path.name,
+                matched_stain,
+                matched_word,
+            )
         else:
+            # 3) Single stain or default H&E
             matched_stain, matched_word = find_exact_stain(corrected_words, stain_dict)
-            logging.info("[INIT] %s -> Initial Stain: '%s' (matched token: '%s')",
-                         image_path.name, matched_stain, matched_word)
+            logging.info(
+                "[INIT] %s -> Initial Stain: '%s' (matched token: '%s')",
+                image_path.name,
+                matched_stain,
+                matched_word,
+            )
 
+    # ---- ROI fallback logic ----
     roi_stain = ""
     final_stain = matched_stain
     origin = "Primary"
@@ -595,28 +604,62 @@ def detect_stain_for_image(image_path: Path,
     # Mandatory ROI/classifier fallback when initial == "H&E"
     if is_exact_he(matched_stain):
         try:
-            logging.info("[ROI] Initial 'H&E' -> running fallback CLI on: %s", image_path.name)
+            logging.info(
+                "[ROI] Initial 'H&E' -> running fallback CLI on: %s",
+                image_path.name,
+            )
             roi_row = run_roi_fallback_cli_for_single_image(
                 cfg=cfg,
                 image_path=image_path,
                 log_level=cfg.log_level,
             )
+
             if roi_row:
-                roi_stain = str(roi_row.get("Stain", "")).strip()
-                logging.info("[ROI] ROI Stain: '%s'", roi_stain or "-")
-                if roi_stain and (not is_exact_he(roi_stain)):
-                    final_stain = roi_stain
+                # Safely extract ROI stain and guard against NaN/None
+                raw_val = roi_row.get("Stain", "")
+                if pd.isna(raw_val):
+                    raw_val = ""
+
+                roi_stain_candidate = str(raw_val).strip()
+                logging.info(
+                    "[ROI] ROI Stain (raw->norm): '%s'",
+                    roi_stain_candidate or "-",
+                )
+
+                # If ROI found a *different* non-H&E stain -> override
+                if roi_stain_candidate and not is_exact_he(roi_stain_candidate):
+                    final_stain = roi_stain_candidate
+                    roi_stain = roi_stain_candidate
                     origin = "ROI-Fallback"
                     logging.info("[FINAL] Replaced by ROI: '%s'", final_stain)
                 else:
-                    logging.info("[FINAL] ROI returned 'H&E' (or empty). Keeping initial 'H&E'.")
+                    # ROI empty / NaN / 'H&E' -> keep initial H&E
+                    roi_stain = matched_stain
+                    logging.info(
+                        "[FINAL] ROI empty/'H&E' -> keeping initial '%s'",
+                        final_stain,
+                    )
             else:
-                logging.info("[ROI] No ROI result; keeping '%s'", final_stain)
-        except Exception as exc:
-            logging.error("[ROI][ERR] Fallback failed for %s: %s", image_path.name, exc)
+                # No ROI result at all -> keep initial H&E and mirror it in ROI column
+                roi_stain = matched_stain
+                logging.info(
+                    "[ROI] No ROI result; keeping '%s' and setting ROI stain to same.",
+                    final_stain,
+                )
 
+        except Exception as exc:
+            # On any ROI error, keep initial H&E and mirror it in ROI column
+            roi_stain = matched_stain
+            logging.error(
+                "[ROI][ERR] Fallback failed for %s: %s",
+                image_path.name,
+                exc,
+            )
+
+    # ---- Build Excel hyperlink ----
     uri = get_excel_uri(image_path)
 
+    # ---- Return record ----
     return {
         "FileName": image_path.name,
         "Raw_OCR_Words": ", ".join(map(str, raw_words)),
@@ -629,7 +672,6 @@ def detect_stain_for_image(image_path: Path,
         "Stain_Origin": origin,
         "ImageLink": f'=HYPERLINK("{uri}", "{image_path.name}")',
     }
-
 
 def write_excel_atomic(df: pd.DataFrame, output_excel: Path) -> None:
     """Write the same Excel with hyperlink column via xlsxwriter, then finalize atomically.

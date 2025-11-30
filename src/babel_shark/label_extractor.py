@@ -14,7 +14,7 @@ Main features:
     Command-line interface for run, validate, and version
 
 Usage:
-    PYTHONPATH=./src python -u src/label_extractor.py run \
+    PYTHONPATH=./src/babel_shark/ python -u src/babel_shark/label_extractor.py run \
         --config ./config/config.yaml
 """
 
@@ -115,13 +115,19 @@ def atomic_save_pil_image(img: Image.Image, final_path: Path) -> None:
 # Core
 # --------------------------------------------------------------------------- #
 
-try:
-    import openslide  # type: ignore
-except Exception as exc:  # ImportError or other
-    # Preserve fatal semantics while switching to logging
-    setup_logging("INFO")
-    LOGGER.error("[FATAL] Cannot import openslide. Make sure it's installed: %s", exc)
-    sys.exit(1)
+# --- Delayed import of openslide (Windows-safe) ------------------------------
+# We import openslide only AFTER DLL preparation has been attempted.
+openslide = None  # will be set by _load_openslide_after_dll_prep()
+
+def _load_openslide_after_dll_prep():
+    """Import openslide only after DLL paths are prepared (Windows-safe)."""
+    try:
+        import openslide as _openslide  # type: ignore
+        return _openslide
+    except Exception as exc:  # ImportError or other
+        setup_logging("INFO")
+        LOGGER.error("[FATAL] Cannot import openslide. Make sure it's installed: %s", exc)
+        sys.exit(1)
 
 
 class LabelExtractor:
@@ -155,7 +161,7 @@ class LabelExtractor:
     def is_supported_wsi(filepath: Path) -> bool:
         """Return True if file can be opened by OpenSlide."""
         try:
-            slide = openslide.OpenSlide(str(filepath))
+            slide = openslide.OpenSlide(str(filepath))  # uses delayed-imported module
             slide.close()
             return True
         except Exception:
@@ -276,6 +282,10 @@ def run_extraction(config_path: Path, openslide_dll: Optional[str], log_level: s
 
     # Windows DLL setup (same logic)
     prepare_windows_dlls(openslide_dll or (config.get("dll_paths", {}) or {}).get("openslide_dll", None))
+
+    # Import openslide now (AFTER DLL prep)
+    global openslide
+    openslide = _load_openslide_after_dll_prep()
 
     extractor = LabelExtractor(
         input_dir=paths.input_dir,

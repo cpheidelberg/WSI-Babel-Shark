@@ -3,7 +3,7 @@
 """
 datamatrix_reader.py — Babel-Shark DataMatrix Reader
 
-Decodes DataMatrix barcodes from pathology label images and extracts
+Decodes DataMatrix from pathology label images and extracts
 structured slide metadata into an Excel report.
 
 Main features:
@@ -14,7 +14,7 @@ Main features:
     Command-line interface for run, validate, and version
 
 Usage:
-    PYTHONPATH=./src python -u src/datamatrix_reader.py run \
+    PYTHONPATH=./src/babel_shark/ python -u src/babel_shark/datamatrix_reader.py run \
         --config ./config/config.yaml
 """
 

@@ -1,6 +1,16 @@
 """
-Unit test for database_manager using a temporary SQLite file.
+Unit tests for the SQLite-based database manager.
+
+Focus:
+    - Creating an in-memory or temporary on-disk database
+    - Creating the expected table(s)
+    - Inserting a minimal row
+    - Reading the row back and validating the stored fields
+
+These tests are intentionally small and fast and do not depend on any
+external pipeline logic.
 """
+
 import sqlite3
 import pytest
 

@@ -16,15 +16,15 @@ Main features:
 
 Usage:
     # Run collection
-    PYTHONPATH=./src python -u src/collect_slides.py run \
+    PYTHONPATH=./src/babel_shark python -u src/babel_shark/collect_slides.py run \
         --config ./config/config.yaml
 
     # Validate configuration
-    PYTHONPATH=./src python -u src/collect_slides.py validate \
+    PYTHONPATH=./src/babel_shark python -u src/babel_shark/collect_slides.py validate \
         --config ./config/config.yaml
 
     # Show version
-    PYTHONPATH=./src python -u src/collect_slides.py version
+    PYTHONPATH=./src/babel_shark python -u src/babel_shark/collect_slides.py version
 """
 
 from __future__ import annotations

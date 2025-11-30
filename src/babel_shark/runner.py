@@ -9,21 +9,20 @@ SQLite database.
 
 Main features
 - Executes all stages sequentially:
-    1. collect_slides
+    1. collect_slides (copy/move to staging)
     2. label_extractor
     3. datamatrix_reader
-    4. roi_metadata_extractor.py
+    4. roi_metadata_extractor
     5. stain_extractor
     6. slide_id_generator
-    7. database_manager 
+    7. database_manager (sqlite_table_generator)
 - Manages I/O paths and timestamps from a single YAML config.
 - Tracks run progress and errors through unified logging.
-- Supports watch mode, dry-run patterns (via config), and step selection.
-- Command-line interface for run, validate, and version.
+- Supports watch mode (periodic polling of watch_dir).
 
 Usage
 -----
-    PYTHONPATH=./src python -u src/runner.py run \
+    PYTHONPATH=./src/babel_shark python -u src/babel_shark/runner.py run \
         --config ./config/config.yaml
 """
 
@@ -53,6 +52,7 @@ __module_prog__ = "WSI-Babel-Shark"
 # Logging
 # --------------------------------------------------------------------------------------
 
+
 def setup_logging(level: str = "INFO") -> None:
     """Configure the root logger with a simple, consistent format."""
     numeric = getattr(logging, level.upper(), logging.INFO)
@@ -78,8 +78,12 @@ def _attach_file_logger(log_file: Path) -> None:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(root.level)
-    fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s",
-                                      datefmt="%Y-%m-%d %H:%M:%S"))
+    fh.setFormatter(
+        logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
     root.addHandler(fh)
     logging.info(f"[LOG] File logging enabled: {log_file}")
 
@@ -87,6 +91,7 @@ def _attach_file_logger(log_file: Path) -> None:
 # --------------------------------------------------------------------------------------
 # Atomic I/O Utilities
 # --------------------------------------------------------------------------------------
+
 
 def _atomic_write_bytes(dst: Path, data: bytes) -> None:
     """Write bytes atomically to dst using a temporary file and os.replace."""
@@ -110,19 +115,6 @@ def _atomic_write_yaml(dst: Path, obj: Dict[str, Any]) -> None:
     _atomic_write_text(dst, text, encoding="utf-8")
 
 
-def _atomic_write_csv_from_df(dst: Path, df: pd.DataFrame) -> None:
-    """Write DataFrame to CSV atomically."""
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        dir=dst.parent, delete=False, suffix=".csv", mode="w", encoding="utf-8", newline=""
-    ) as tmp:
-        df.to_csv(tmp, index=False)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-        tmp_path = Path(tmp.name)
-    os.replace(tmp_path, dst)
-
-
 def _atomic_write_excel_from_df(dst: Path, df: pd.DataFrame) -> None:
     """Write DataFrame to a single-sheet Excel atomically."""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -138,6 +130,7 @@ def _atomic_write_excel_from_df(dst: Path, df: pd.DataFrame) -> None:
 # --------------------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------------------
+
 
 def _default_wsi_exts() -> Tuple[str, ...]:
     """Fallback list of allowed WSI extensions (plus common image types)."""
@@ -177,6 +170,7 @@ def _list_regular_files(folder: Path) -> List[Path]:
 # DB Layer
 # --------------------------------------------------------------------------------------
 
+
 def ensure_db(db_path: Path) -> sqlite3.Connection:
     """Open/create SQLite DB with sane PRAGMAs for stability/concurrency."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -189,18 +183,29 @@ def ensure_db(db_path: Path) -> sqlite3.Connection:
 
 
 def ensure_registry_schema(conn: sqlite3.Connection, table: str) -> None:
-    """Create slide registry schema and indexes if missing."""
+    """
+    Create slide registry schema and indexes if missing.
+
+    NOTE:
+    - This schema is aligned conceptually with database_manager/sqlite_table_generator
+      but extended to support:
+        * scan_time_utc       (real scan time in UTC, from slide metadata)
+        * analysis_time_utc   (timestamp of Babel-Shark analysis)
+        * input_path          (root of input WSIs)
+        * output_path         (root of renamed WSIs)
+    - Population of these fields is done downstream (not in runner itself).
+    """
     cur = conn.cursor()
     cur.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {table} (
             id                   INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id               TEXT NOT NULL,
-            file_name            TEXT NOT NULL,
+            file_name            TEXT NOT NULL,                -- label image name
             slide_id             TEXT,
             case_id              TEXT,
             original_file_name   TEXT,
-            new_file_name        TEXT,
+            new_file_name        TEXT,                         -- UNIQUE across registry
             datamatrix           TEXT,
             labid                TEXT,
             year4                TEXT,
@@ -210,12 +215,19 @@ def ensure_registry_schema(conn: sqlite3.Connection, table: str) -> None:
             section              TEXT,
             stain                TEXT,
             method_of_extraction TEXT,
+            scan_time_utc        TEXT,                         -- REAL scan time (UTC) from metadata
+            analysis_time_utc    TEXT,                         -- Babel-Shark run timestamp (UTC/naive ISO)
+            input_path           TEXT,                         -- root input folder (watch_dir)
+            output_path          TEXT,                         -- root final_output_dir
+            status               TEXT,                         -- success / failed
             inserted_at          TEXT DEFAULT (datetime('now'))
         );
         """
     )
     cur.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS ux_{table}_newfile ON {table}(new_file_name);")
     cur.execute(f"CREATE INDEX IF NOT EXISTS ix_{table}_orig ON {table}(original_file_name);")
+    cur.execute(f"CREATE INDEX IF NOT EXISTS ix_{table}_datamatrix ON {table}(datamatrix);")
+    cur.execute(f"CREATE INDEX IF NOT EXISTS ix_{table}_lab_case ON {table}(labid, case6);")
     conn.commit()
 
 
@@ -242,139 +254,23 @@ def fetch_seen_original_names_from_db(cfg: Dict[str, Any]) -> Set[str]:
         conn.close()
 
 
-def mark_original_in_db(cfg: Dict[str, Any], run_id: str, original_name: str) -> None:
-    """Insert placeholder row for a processed original file (idempotent)."""
-    if not original_name:
-        return
-    db_path = Path(cfg.get("sqlite_db_path", "registry.db"))
-    table = safe_table(cfg.get("ops_table", "slide_registry"))
-
-    conn = ensure_db(db_path)
-    ensure_registry_schema(conn, table)
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            f"""
-            INSERT INTO {table} (run_id, file_name, original_file_name)
-            SELECT ?, ?, ?
-            WHERE NOT EXISTS (
-                SELECT 1 FROM {table} WHERE original_file_name = ?
-            );
-            """,
-            (run_id, original_name, original_name, original_name),
-        )
-        conn.commit()
-    except Exception as exc:
-        logging.info(f"[WARN] Could not mark original in DB ({original_name}): {exc}")
-    finally:
-        conn.close()
-
-
-def mark_successful_files(cfg: Dict[str, Any], run_id: str, originals: List[str]) -> int:
-    """Mark only successfully renamed slides (present under CaseID tree) in the DB."""
-    csv_path = Path(cfg["metadata_csv_path"])
-    renamed_root = Path(cfg["slide_id_generator"]["final_output_dir"])
-
-    if not csv_path.exists():
-        logging.info(f"[WARN] metadata_csv_path not found: {csv_path}")
-        return 0
-
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as exc:
-        logging.info(f"[WARN] Could not read metadata_csv_path: {exc}")
-        return 0
-
-    col_orig = "OriginalFileName" if "OriginalFileName" in df.columns else "FileName"
-    if col_orig not in df.columns or "NewFileName" not in df.columns:
-        logging.info("[WARN] metadata_csv_path is missing required columns.")
-        return 0
-
-    orig_set = {o.strip().lower() for o in originals}
-    subset = df[df[col_orig].astype(str).str.strip().str.lower().isin(orig_set)].copy()
-    if subset.empty:
-        return 0
-
-    subset = subset[subset["NewFileName"].notna() & (subset["NewFileName"].astype(str).str.strip() != "")]
-    if subset.empty:
-        return 0
-
-    marked = 0
-    for _, row in subset.iterrows():
-        original_name = str(row[col_orig]).strip()
-        new_name = str(row["NewFileName"]).strip()
-
-        try:
-            found = any(renamed_root.rglob(new_name))
-        except Exception:
-            found = False
-        if not found:
-            continue
-
-        mark_original_in_db(cfg, run_id, original_name)
-        marked += 1
-
-    logging.info(f"[OK] Marked {marked} file(s) as processed in DB.")
-    return marked
-
-
-# --------------------------------------------------------------------------------------
-# CSV Compatibility Helper
-# --------------------------------------------------------------------------------------
-
-def create_metadata_csv_if_needed(csv_path: Path) -> None:
-    """Ensure slide_metadata.csv exists with expected columns (no 'Status')."""
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    want_cols = [
-        "FileName",
-        "SlideID",
-        "CaseID",
-        "NewFileName",
-        "OriginalFileName",
-        "method of extraction",
-    ]
-
-    if not csv_path.exists() or csv_path.stat().st_size == 0:
-        df = pd.DataFrame(columns=want_cols)
-        _atomic_write_csv_from_df(csv_path, df)
-        logging.info(f"[INFO] Created/initialized metadata CSV: {csv_path}")
-        return
-
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception:
-        df = pd.DataFrame(columns=want_cols)
-
-    changed = False
-    if "Status" in df.columns:
-        df = df.drop(columns=["Status"])
-        changed = True
-    for col in want_cols:
-        if col not in df.columns:
-            df[col] = None
-            changed = True
-    if changed:
-        _atomic_write_csv_from_df(csv_path, df)
-        logging.info(f"[INFO] Normalized metadata CSV schema (no 'Status'): {csv_path}")
-
-
 # --------------------------------------------------------------------------------------
 # File System: COPY/MOVE Stage (marking deferred)
 # --------------------------------------------------------------------------------------
+
 
 def copy_new_slides(
     cfg: Dict[str, Any],
     watch_dir: Path,
     staging_dir: Path,
-    metadata_csv: Path,
     failed_dir: Path,
-    run_id: str,
+    run_id: str,  # kept for future auditing if needed
 ) -> List[str]:
     """Copy/move new slides from watch folder into staging based on cfg['operation_mode'].
 
     Notes:
-        - This function does NOT mark files in DB. It returns the list of
-          original file names for this run. Marking is done after SlideIDcreator.
+        - This function does NOT write CSV and does NOT touch the DB.
+        - It returns the list of original file names for this run.
         - Duplicate detection relies ONLY on the SQLite registry (original_file_name).
     """
     staging_dir.mkdir(parents=True, exist_ok=True)
@@ -464,6 +360,7 @@ def copy_new_slides(
 # Child Script Runner
 # --------------------------------------------------------------------------------------
 
+
 def run_script(
     step_title: str,
     script_path: str,
@@ -516,8 +413,9 @@ def run_script(
 # ROI Merge & Fallback Helpers
 # --------------------------------------------------------------------------------------
 
+
 def _ensure_extraction_method_col(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure 'ExtractionMethod' exists; infer 'DataMatrix' where appropriate."""
+    """Ensure 'ExtractionMethod' exists and is consistent with populated DataMatrix."""
     if df is None or df.empty:
         return df
     if "ExtractionMethod" not in df.columns:
@@ -532,136 +430,217 @@ def _ensure_extraction_method_col(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _merge_roi_into_datamatrix(dm_xlsx: Path, roi_csv: Path) -> Set[str]:
-    """Merge successful ROI results back into main DataMatrix Excel."""
-    if not dm_xlsx.exists() or not roi_csv.exists():
-        return set()
+def _merge_roi_into_datamatrix(dm_excel: Path, roi_csv: Path) -> None:
+    """
+    Merge ROI fallback results into the main DataMatrix Excel with FULL metadata merging.
+
+    - Fills DataMatrix from ROI where missing in the DM Excel.
+    - Fills LabID / Year / CaseNumber / Pot / BlockID / Section only if missing in DM Excel.
+    - Cleans ROI values: '', NaN, 'nan', 'none', 'null', 'NA', '[]' -> treated as missing.
+    - Marks rows updated from ROI with ExtractionMethod = 'ROIbase'.
+    - Explicitly casts involved columns to string dtype to avoid pandas FutureWarning
+      about incompatible dtypes on assignment.
+    """
+
+    # ---------------------------------------------------------------
+    # 1) Load Excel / CSV safely
+    # ---------------------------------------------------------------
+    if not dm_excel.exists() or not roi_csv.exists():
+        return
 
     try:
-        df_dm = pd.read_excel(dm_xlsx)
-    except Exception:
-        df_dm = pd.DataFrame()
+        # Do not rely only on dtype=str; we will explicitly cast later
+        df_dm = pd.read_excel(dm_excel)
+    except Exception as exc:
+        logging.info(f"[WARN] Cannot read DataMatrix Excel: {dm_excel} -> {exc}")
+        return
 
     try:
         df_roi = pd.read_csv(roi_csv)
-    except Exception:
-        df_roi = pd.DataFrame()
+    except Exception as exc:
+        logging.info(f"[WARN] Cannot read ROI CSV: {roi_csv} -> {exc}")
+        return
 
-    if df_roi.empty:
-        return set()
+    # Ensure FileName exists in both
+    if "FileName" not in df_dm.columns or "FileName" not in df_roi.columns:
+        logging.info("[WARN] Missing FileName column; cannot merge ROI.")
+        return
 
-    ok = df_roi.copy()
-    if "Status" in ok.columns:
-        ok = ok[ok["Status"].astype(str).str.lower().eq("success")]
-    if "DataMatrix" in ok.columns:
-        ok = ok[ok["DataMatrix"].notna() & (ok["DataMatrix"].astype(str).str.strip() != "")]
+    # ---------------------------------------------------------------
+    # 2) Normalize missing ROI columns
+    # ---------------------------------------------------------------
+    roi_meta_cols = ["DataMatrix", "LabID", "Year", "CaseNumber", "Pot", "BlockID", "Section"]
+    for col in roi_meta_cols:
+        if col not in df_roi.columns:
+            df_roi[col] = None
 
-    if ok.empty:
-        return set()
-
-    update_cols = ["DataMatrix", "LabID", "Year", "CaseNumber", "Pot", "BlockID", "Section"]
-    key = "FileName"
-    if key not in ok.columns:
-        return set()
-
-    recovered_files = set(ok[key].astype(str).tolist())
-
-    if df_dm is not None and not df_dm.empty:
+    # ---------------------------------------------------------------
+    # 3) Ensure ExtractionMethod exists (no crash on .astype)
+    # ---------------------------------------------------------------
+    # Use the helper if available in this module
+    try:
         df_dm = _ensure_extraction_method_col(df_dm)
-
-    if df_dm is None or df_dm.empty:
-        df_dm = ok[[c for c in [key] + update_cols if c in ok.columns]].copy()
-        for c in df_dm.columns:
-            df_dm[c] = df_dm[c].astype(object)
-        df_dm["ExtractionMethod"] = "ROIbase"
-    else:
-        if key not in df_dm.columns:
-            df_dm[key] = ""
+    except NameError:
+        # Fallback: minimal behavior if helper is not present
         if "ExtractionMethod" not in df_dm.columns:
             df_dm["ExtractionMethod"] = None
 
-        cols_to_obj = [c for c in [key, "ExtractionMethod"] + update_cols if c in df_dm.columns]
-        for col in cols_to_obj:
-            try:
-                if df_dm[col].dtype != object:
-                    df_dm[col] = df_dm[col].astype(object)
-            except Exception:
-                pass
+    # For ROI we do not strictly need ExtractionMethod, but keep it consistent
+    if "ExtractionMethod" not in df_roi.columns:
+        df_roi["ExtractionMethod"] = None
 
-        df_dm.set_index(key, inplace=True, drop=False)
+    # ---------------------------------------------------------------
+    # 4) Clean ROI values — treat empty-like tokens as missing
+    # ---------------------------------------------------------------
+    def _clean_roi_value(x: object) -> Optional[str]:
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return None
+        s = str(x).strip()
+        if s == "" or s.upper() in {"NAN", "NONE", "NULL", "NA", "[]"}:
+            return None
+        return s
 
-        for _, row in ok.iterrows():
-            fname = str(row[key])
-            if fname in df_dm.index:
-                for col in update_cols:
-                    if col in ok.columns:
-                        val = row.get(col)
-                        if pd.notna(val) and str(val).strip() != "":
-                            df_dm.at[fname, col] = str(val)
-                df_dm.at[fname, "ExtractionMethod"] = "ROIbase"
-            else:
-                new_row: Dict[str, Any] = {}
-                for c in df_dm.columns:
-                    new_row.setdefault(c, None)
-                for col in [key] + update_cols:
-                    if col in ok.columns:
-                        v = row.get(col)
-                        new_row[col] = str(v) if pd.notna(v) else None
-                new_row["ExtractionMethod"] = "ROIbase"
-                df_dm.loc[fname] = new_row
+    for col in roi_meta_cols:
+        df_roi[col] = df_roi[col].apply(_clean_roi_value)
 
-        df_dm.reset_index(drop=True, inplace=True)
+    # ---------------------------------------------------------------
+    # 5) Prepare merge subset and merge ROI into DM
+    # ---------------------------------------------------------------
+    merge_cols = ["FileName"] + roi_meta_cols
+    merge_subset = df_roi[merge_cols].copy()
 
-        if "DataMatrix" in df_dm.columns:
-            mask_default = (
-                df_dm["DataMatrix"].notna()
-                & (df_dm["DataMatrix"].astype(str).str.strip() != "")
-                & (df_dm["ExtractionMethod"].isna())
-            )
-            df_dm.loc[mask_default, "ExtractionMethod"] = "DataMatrix"
+    df_dm = df_dm.merge(
+        merge_subset,
+        on="FileName",
+        how="left",
+        suffixes=("", "_roi"),
+    )
 
-    try:
-        _atomic_write_excel_from_df(dm_xlsx, df_dm)
-        logging.info(f"[OK] DataMatrix Excel merged (method column set): {dm_xlsx}")
-    except Exception as exc:
-        logging.info(f"[WARN] Could not save merged DataMatrix Excel: {exc}")
+    # ---------------------------------------------------------------
+    # 6) Cast involved metadata columns to string dtype explicitly
+    #    to avoid FutureWarning on assignment
+    # ---------------------------------------------------------------
+    all_cols_to_cast = ["DataMatrix", "LabID", "Year", "CaseNumber", "Pot", "BlockID", "Section"]
 
-    return recovered_files
+    for col in all_cols_to_cast:
+        # Base column in DM
+        if col in df_dm.columns:
+            df_dm[col] = df_dm[col].astype("string")
+        else:
+            # Create empty string column if missing
+            df_dm[col] = pd.Series([""] * len(df_dm), dtype="string")
+
+        # ROI column after merge
+        roi_col = f"{col}_roi"
+        if roi_col in df_dm.columns:
+            df_dm[roi_col] = df_dm[roi_col].astype("string")
+
+    # Ensure ExtractionMethod is string-type as well
+    if "ExtractionMethod" in df_dm.columns:
+        df_dm["ExtractionMethod"] = df_dm["ExtractionMethod"].astype("string")
+    else:
+        df_dm["ExtractionMethod"] = pd.Series([""] * len(df_dm), dtype="string")
+
+    # ---------------------------------------------------------------
+    # 7) Fill DataMatrix when empty in DM and non-empty in ROI
+    # ---------------------------------------------------------------
+    has_dm_roi = "DataMatrix_roi" in df_dm.columns
+
+    if has_dm_roi:
+        mask_dm_update = (
+            df_dm["DataMatrix"].isna()
+            | (df_dm["DataMatrix"].astype(str).str.strip() == "")
+        ) & df_dm["DataMatrix_roi"].notna()
+
+        df_dm.loc[mask_dm_update, "DataMatrix"] = df_dm.loc[mask_dm_update, "DataMatrix_roi"]
+    else:
+        mask_dm_update = pd.Series([False] * len(df_dm), index=df_dm.index)
+
+    # ---------------------------------------------------------------
+    # 8) Fill other metadata fields (LabID, Year, CaseNumber, Pot, BlockID, Section)
+    # ---------------------------------------------------------------
+    meta_update_mask = mask_dm_update.copy()
+
+    for field in ["LabID", "Year", "CaseNumber", "Pot", "BlockID", "Section"]:
+        roi_col = f"{field}_roi"
+        if roi_col not in df_dm.columns:
+            continue
+
+        # Field is considered empty if NaN or empty string after strip
+        mask_field = (
+            df_dm[field].isna()
+            | (df_dm[field].astype(str).str.strip() == "")
+        ) & df_dm[roi_col].notna()
+
+        df_dm.loc[mask_field, field] = df_dm.loc[mask_field, roi_col]
+        meta_update_mask |= mask_field
+
+    # ---------------------------------------------------------------
+    # 9) Mark rows updated by ROI as ROIbase
+    # ---------------------------------------------------------------
+    df_dm.loc[meta_update_mask, "ExtractionMethod"] = "ROIbase"
+
+    # ---------------------------------------------------------------
+    # 10) Drop temporary *_roi columns
+    # ---------------------------------------------------------------
+    drop_cols = [c for c in df_dm.columns if c.endswith("_roi")]
+    df_dm = df_dm.drop(columns=drop_cols, errors="ignore")
+
+    # ---------------------------------------------------------------
+    # 11) Write back to Excel
+    # ---------------------------------------------------------------
+    _atomic_write_excel_from_df(dm_excel, df_dm)
+    logging.info(f"[OK] ROI metadata merged into DataMatrix Excel: {dm_excel}")
 
 
-def _move_unresolved_to_fallback(datamatrix_failed_dir: Path, roi_csv: Path, fallback_failed_dir: Path) -> None:
-    """Move images unresolved after ROI fallback from failed_datamatrix to fallback folder."""
-    datamatrix_failed_dir.mkdir(parents=True, exist_ok=True)
+def _move_unresolved_to_fallback(
+    datamatrix_failed_dir: Path,
+    roi_csv: Path,
+    fallback_failed_dir: Path,
+) -> None:
+    """
+    Move files that remain unresolved after ROI fallback into a separate 'fallback_failed' folder.
+    """
     fallback_failed_dir.mkdir(parents=True, exist_ok=True)
 
-    files_in_failed = {p.name: p for p in _list_regular_files(datamatrix_failed_dir)}
-    if not files_in_failed:
+    try:
+        df_roi = pd.read_csv(roi_csv)
+    except Exception as exc:
+        logging.info(f"[WARN] Cannot read ROI CSV for fallback move: {roi_csv} -> {exc}")
         return
 
-    resolved: Set[str] = set()
-    if roi_csv.exists():
-        try:
-            df_roi = pd.read_csv(roi_csv)
-            if not df_roi.empty and "FileName" in df_roi.columns and "Status" in df_roi.columns:
-                good = df_roi[df_roi["Status"].astype(str).str.lower().eq("success")]
-                resolved = set(good["FileName"].astype(str).tolist())
-        except Exception:
-            pass
+    unresolved: Set[str] = set()
+    if "FileName" in df_roi.columns and "DataMatrix" in df_roi.columns:
+        unresolved = set(
+            df_roi.loc[
+                df_roi["DataMatrix"].isna()
+                | (df_roi["DataMatrix"].astype(str).str.strip() == ""),
+                "FileName",
+            ].astype(str)
+        )
+    else:
+        logging.info("[WARN] ROI CSV missing 'FileName' or 'DataMatrix'; cannot determine unresolved.")
+        return
 
-    for name, path in files_in_failed.items():
-        if name in resolved:
+    if not datamatrix_failed_dir.exists():
+        return
+
+    for file in datamatrix_failed_dir.iterdir():
+        if not file.is_file():
             continue
-        try:
-            dest = fallback_failed_dir / name
-            shutil.move(str(path), str(dest))
-            logging.info(f"[INFO] Unresolved after ROI -> moved to fallback: {dest}")
-        except Exception as exc:
-            logging.info(f"[WARN] Could not move unresolved file {name} to fallback: {exc}")
+        if file.name in unresolved:
+            dest = fallback_failed_dir / file.name
+            try:
+                shutil.move(str(file), str(dest))
+                logging.info(f"[INFO] Moved unresolved ROI file to fallback_failed: {dest}")
+            except Exception as exc:
+                logging.info(f"[WARN] Could not move unresolved file {file} -> {exc}")
 
 
 # --------------------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------------------
+
 
 def _load_config(config_path: Path) -> Dict[str, Any]:
     """Load YAML config from disk."""
@@ -686,7 +665,6 @@ def _prepare_runtime_paths(cfg: Dict[str, Any], timestamp: str) -> Dict[str, Pat
         "stain_output_excel": stain_output_excel,
         "stain_output_pdf": stain_output_pdf,
         "allslides_dir": Path(cfg["staging_dir"]),
-        "db_csv_path": Path(cfg["metadata_csv_path"]),
         "failed_output_dir": Path(cfg["failed_output_dir"]),
         "datamatrix_failed_dir": output_run_dir / "failed_datamatrix",
         "fallback_failed_dir": output_run_dir / "failed_fallback",
@@ -718,13 +696,22 @@ def run_once(cfg: Dict[str, Any]) -> None:
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
     paths = _prepare_runtime_paths(cfg, timestamp)
 
-    # Enable per-run file logging in the run folder
+    # Step 0: import new slides into staging (marking deferred)
+    originals = copy_new_slides(
+        cfg=cfg,
+        watch_dir=Path(cfg["watch_dir"]),
+        staging_dir=paths["allslides_dir"],
+        failed_dir=paths["failed_output_dir"],
+        run_id=timestamp,
+    )
+
+    if not originals:
+        logging.info("[INFO] No new slides to process.")
+        return
+
     paths["output_run_dir"].mkdir(parents=True, exist_ok=True)
     log_file = paths["output_run_dir"] / f"pipeline_{timestamp}.log"
     _attach_file_logger(log_file)
-
-    # Ensure downstream CSV schema (not used for dedup)
-    create_metadata_csv_if_needed(paths["db_csv_path"])
 
     # Ensure the SQLite registry exists before usage
     try:
@@ -736,23 +723,6 @@ def run_once(cfg: Dict[str, Any]) -> None:
         logging.info(f"[OK] SQLite registry ready: {db_path} (table: {table})")
     except Exception as exc:
         logging.info(f"[WARN] Could not initialize SQLite registry: {exc}")
-
-    # Fresh staging
-    clear_folder(paths["allslides_dir"])
-
-    # Step 0: import new slides into staging (marking deferred)
-    originals = copy_new_slides(
-        cfg=cfg,
-        watch_dir=Path(cfg["watch_dir"]),
-        staging_dir=paths["allslides_dir"],
-        metadata_csv=paths["db_csv_path"],
-        failed_dir=paths["failed_output_dir"],
-        run_id=timestamp,
-    )
-
-    if not originals:
-        logging.info("[INFO] No new slides to process.")
-        return
 
     # Ensure required folders for later steps
     paths["label_crops_dir"].mkdir(parents=True, exist_ok=True)
@@ -806,8 +776,8 @@ def run_once(cfg: Dict[str, Any]) -> None:
         logging.info(f"[STEP] ROI fallback: {len(files_waiting)} file(s) in {paths['datamatrix_failed_dir']}")
 
         roi_csv = paths["output_run_dir"] / f"roi_results_{timestamp}.csv"
-        roi_xlsx = paths["output_run_dir"] / f"roi_results_{timestamp}.xlsx"
-        roi_pdf = paths["output_run_dir"] / f"roi_results_{timestamp}.pdf"
+        roi_xlsx = paths["output_run_dir"] / "roi_results.xlsx"
+        roi_pdf = paths["output_run_dir"] / "roi_results.pdf"
         roi_debug_parts = paths["output_run_dir"] / f"roi_debug_parts_{timestamp}"
 
         roi_config = runtime_config.copy()
@@ -839,7 +809,11 @@ def run_once(cfg: Dict[str, Any]) -> None:
             logging.info("[WARN] ROI fallback step failed; continuing without it.")
         else:
             _merge_roi_into_datamatrix(paths["datamatrix_output_excel"], roi_csv)
-            _move_unresolved_to_fallback(paths["datamatrix_failed_dir"], roi_csv, paths["fallback_failed_dir"])
+            _move_unresolved_to_fallback(
+                paths["datamatrix_failed_dir"],
+                roi_csv,
+                paths["fallback_failed_dir"],
+            )
 
         temp_config_roi.unlink(missing_ok=True)
     else:
@@ -869,13 +843,7 @@ def run_once(cfg: Dict[str, Any]) -> None:
     ):
         return
 
-    # 4.5) Mark only successful files in DB (present under CaseID tree)
-    try:
-        mark_successful_files(cfg, timestamp, originals)
-    except Exception as exc:
-        logging.info(f"[WARN] Could not mark successful files: {exc}")
-
-    # 5) SQLiteTableGenerator (optional)
+    # 5) SQLiteTableGenerator (optional, now DB-only; no CSV dependency)
     sqlite_script = (cfg.get("scripts", {}) or {}).get("sqlite_table_generator")
     if sqlite_script:
         logging.info(f"[STEP] SQLiteTableGenerator using config: {temp_config_path}")
@@ -917,7 +885,6 @@ _REQUIRED_TOP_KEYS = [
     "run_output_dir",
     "label_root_dir",
     "staging_dir",
-    "metadata_csv_path",
     "failed_output_dir",
     "scripts",
     "slide_id_generator",
@@ -949,93 +916,56 @@ def validate(cfg_path: Path) -> int:
             logging.info(f"[ERROR] Missing required config key: {key}")
             ok = False
 
-    scripts = cfg.get("scripts", {})
-    for key in _REQUIRED_SCRIPTS:
-        if key not in scripts:
-            logging.info(f"[ERROR] Missing required scripts key: scripts.{key}")
-            ok = False
-        else:
-            pth = Path(scripts[key])
-            if not pth.exists():
-                logging.info(f"[WARN] Script not found on disk (will fail at runtime if not fixed): {pth}")
+    if "scripts" in cfg:
+        scripts = cfg["scripts"]
+        for s in _REQUIRED_SCRIPTS:
+            if s not in scripts:
+                logging.info(f"[ERROR] Missing script path for: {s}")
+                ok = False
+            else:
+                sp = Path(scripts[s])
+                if not sp.exists():
+                    logging.info(f"[ERROR] Script not found: {sp}")
+                    ok = False
 
-    for key in ("run_output_dir", "label_root_dir", "failed_output_dir"):
-        pth = Path(cfg.get(key, ""))
-        if not pth:
-            continue
-        try:
-            pth.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
-            logging.info(f"[ERROR] Cannot create/access folder for {key}: {pth} -> {exc}")
-            ok = False
+    if not ok:
+        return 2
 
-    db_path = Path(cfg.get("sqlite_db_path", "registry.db"))
-    try:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-    except Exception as exc:
-        logging.info(f"[ERROR] Cannot create DB parent folder: {db_path.parent} -> {exc}")
-        ok = False
-
-    if ok:
-        logging.info("[OK] Config validation passed.")
-        return 0
-
-    logging.info("[ERROR] Config validation failed.")
-    return 1
+    logging.info("[OK] Config validation successful.")
+    return 0
 
 
 # --------------------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------------------
 
-def _build_cli(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    """Build and parse CLI arguments with subcommands."""
+
+def build_cli(argv: Optional[List[str]] = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=__module_prog__,
-        description="Run the Babel-Shark WSI Metadata Extraction Pipeline."
+        description="WSI-Babel-Shark pipeline runner.",
     )
-    sub = parser.add_subparsers(dest="command")
+    sub = parser.add_subparsers(dest="command", required=True)
 
-    p_run = sub.add_parser("run", help="Execute the pipeline (default).")
-    p_run.add_argument("--config", type=str, required=True, help="Path to the YAML configuration file.")
+    p_run = sub.add_parser("run", help="Run the pipeline using a YAML config.")
+    p_run.add_argument("--config", required=True, help="Path to YAML config file.")
+    p_run.set_defaults(func=lambda args: run(Path(args.config)))
 
-    p_val = sub.add_parser("validate", help="Validate configuration file and environment.")
-    p_val.add_argument("--config", type=str, required=True, help="Path to the YAML configuration file.")
+    p_val = sub.add_parser("validate", help="Validate the YAML config file.")
+    p_val.add_argument("--config", required=True, help="Path to YAML config file.")
+    p_val.set_defaults(func=lambda args: sys.exit(validate(Path(args.config))))
 
-    sub.add_parser("version", help="Print version and exit.")
+    p_ver = sub.add_parser("version", help="Show version information.")
+    p_ver.set_defaults(func=lambda args: print(f"{__module_prog__} runner 1.1.0", flush=True))
 
-    # Compatibility: allow top-level --config to imply 'run'
-    parser.add_argument("--config", type=str, help=argparse.SUPPRESS)
+    return parser
 
+
+def main(argv: Optional[List[str]] = None) -> None:
+    parser = build_cli(argv)
     args = parser.parse_args(argv)
+    args.func(args)
 
-    if args.command is None and getattr(args, "config", None):
-        args.command = "run"
-    return args
-
-
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    """CLI entry point."""
-    args = _build_cli(argv)
-
-    if args.command == "version":
-        setup_logging("INFO")
-        logging.info(__version__)
-        return 0
-
-    if args.command == "validate":
-        return validate(Path(args.config).resolve())
-
-    if args.command == "run":
-        run(Path(args.config).resolve())
-        return 0
-
-    setup_logging("INFO")
-    logging.info("No command provided. Use one of: run, validate, version.")
-    return 2
-# --------------------------------------------------------------------------------------
-# Script execution guard
-# --------------------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

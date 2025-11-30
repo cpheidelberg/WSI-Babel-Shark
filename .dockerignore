@@ -1,0 +1,25 @@
+# Byte-compiled / optimized / extension files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Pytest cache
+.pytest_cache/
+tests/.pytest_cache/
+
+# Test suite (not needed inside the image)
+tests/
+
+# Output / data (kept on the host, not copied into the image)
+output/
+data/
+
+# Git / IDE / editors
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+*.swo
+

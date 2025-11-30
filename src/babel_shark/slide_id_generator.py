@@ -1,23 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-slide_id_generator.py — Babel-Shark Slide ID Generator
+slide_id_generator.py — Unified Slide ID builder & Excel registry writer
 
-Generates unique SlideIDs and standardized file names by merging
-DataMatrix and stain results, then renames WSIs accordingly.
+This script reads upstream Excel outputs (DataMatrix + Stain), merges them,
+computes identifiers (CaseID, SlideID, DataMatrix), moves/renames actual WSI
+files from a staging folder into a per-case folder structure, and writes:
 
-Main features:
-    Merges DataMatrix and stain outputs via case matching
-    Builds SlideID and CaseID identifiers
-    Moves and renames WSIs atomically into structured folders
-    Produces metadata CSV for downstream database updates
-    Command-line interface for run, validate, and version
+    1) slide_metadata.xlsx  (sheet: full_merged)  — per-run registry view
 
-Usage:
-    PYTHONPATH=./src python -u src/slide_id_generator.py run \
+CLI
+---
+Validate:
+    PYTHONPATH=./src/babel_shark \
+        python -u src/babel_shark/slide_id_generator.py validate \
         --config ./config/config.yaml
-"""
 
+Run:
+    PYTHONPATH=./src/babel_shark \
+        python -u src/babel_shark/slide_id_generator.py run \
+        --config ./config/config.yaml --log-level INFO
+
+-----------------
+staging_dir: "data/staging"
+final_output_dir: "data/renamed"
+failed_output_dir: "data/failed"
+metadata_excel_path: "data/registry/slide_metadata.xlsx"
+datamatrix_output_excel: "data/outputs/datamatrix_results.xlsx"
+stain_output_excel:     "data/outputs/stain_results.xlsx"
+dry_run: false
+timestamp_tag_enabled: true   # if true, append _UTC<ScanTime_UTC> to SlideID-based filename
+"""
 
 from __future__ import annotations
 
@@ -28,27 +41,47 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import yaml
 
+# ----------------------------------------------------------------------
+# OpenSlide DLL path (Windows)
+# ----------------------------------------------------------------------
+# IMPORTANT:
+#   Adjust openslide_dll to the folder that contains libopenslide-0.dll, etc.
 
-# --------------------------------------------------------------------------- #
-# Constants 
-# --------------------------------------------------------------------------- #
+openslide = None
+openslide_dll: Optional[str] = None
 
-INVALID_FS_CHARS = '<>:"/\\|?*'
-FS_TRANS_TABLE = str.maketrans({ch: "_" for ch in INVALID_FS_CHARS})
 
-# --------------------------------------------------------------------------- #
-# Logging Setup
-# --------------------------------------------------------------------------- #
+def _setup_openslide(dll_path: Optional[str]) -> None:
+    """Initialize OpenSlide DLL directory (Windows) and import openslide."""
+    global openslide, openslide_dll
+
+    openslide_dll = dll_path
+
+    if dll_path and hasattr(os, "add_dll_directory"):
+        try:
+            os.add_dll_directory(dll_path)
+        except Exception:
+            # Non-fatal; if wrong path, OpenSlide import will fail later.
+            pass
+
+    try:
+        import openslide as _osl  # type: ignore[import]
+        openslide = _osl
+    except Exception:  # noqa: BLE001
+        openslide = None
+
+
+# --------------------------- Logging ---------------------------
 
 def setup_logging(level: str = "INFO") -> None:
-    """Configure root logger to mimic prior print-style output (no level prefix)."""
+    """Configure root logger (stdout, minimal format)."""
     numeric = getattr(logging, level.upper(), logging.INFO)
     logging.basicConfig(
         level=numeric,
@@ -60,29 +93,14 @@ def setup_logging(level: str = "INFO") -> None:
 
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------------- #
-# Data Classes
-# --------------------------------------------------------------------------- #
+# --------------------------- Helpers ---------------------------
 
-@dataclass(frozen=True)
-class ConfigPaths:
-    """Container for all path-like configuration entries."""
-    output_run_dir: Path
-    source_dir: Path
-    renamed_dir: Path
-    failed_dir: Path
-    datamatrix_excel: Path
-    stain_excel: Path
-    metadata_csv: Path
-    timestamp: str
+INVALID_FS_CHARS = '<>:"/\\|?*'
+FS_TRANS_TABLE = str.maketrans({ch: "_" for ch in INVALID_FS_CHARS})
 
-
-# --------------------------------------------------------------------------- #
-# Helpers
-# --------------------------------------------------------------------------- #
 
 def sanitize_fs(name: str) -> str:
-    """Replace filesystem-invalid chars and trim trailing dots/spaces (Windows-safe)."""
+    """Sanitize string for filesystem (Windows-safe)."""
     if name is None:
         return ""
     out = str(name).translate(FS_TRANS_TABLE)
@@ -90,15 +108,11 @@ def sanitize_fs(name: str) -> str:
 
 
 def digits_only(x: object) -> str:
-    """Extract only digits from any value."""
     return re.sub(r"[^\d]", "", str(x) if x is not None else "")
 
 
 def to_int_str_no_decimal(x: object) -> Optional[str]:
-    """Render a number-like value as an integer string without decimals; return None if empty.
-
-    Supports both '2453.0' and '2453,0'.
-    """
+    """Normalize number-like values to integer strings; handle '2453.0' and '2453,0'."""
     if x is None:
         return None
     s = str(x).strip()
@@ -110,7 +124,6 @@ def to_int_str_no_decimal(x: object) -> Optional[str]:
 
 
 def to_year4_str(y: object) -> Optional[str]:
-    """Map 2-digit years to 20xx; keep 4-digit years as-is; else None."""
     s = to_int_str_no_decimal(y)
     if not s:
         return None
@@ -122,7 +135,6 @@ def to_year4_str(y: object) -> Optional[str]:
 
 
 def to_case6_str(c: object) -> Optional[str]:
-    """Zero-pad case numbers to 6 digits (handles inputs like '2453.0' correctly)."""
     s = to_int_str_no_decimal(c)
     if not s:
         return None
@@ -130,31 +142,17 @@ def to_case6_str(c: object) -> Optional[str]:
 
 
 def normalize_stain(s: Optional[str]) -> str:
-    """Normalize common stain spellings; default to H&E when missing."""
     if s is None:
         return "H&E"
     t_raw = str(s).strip()
     t = t_raw.upper().replace(" ", "")
-    if t in {"HE", "H-E", "H& E", "H &E", "H & E"}:
-        return "H&E"
-    if t in {"H&E", "H&Ε"}:
+    if t in {"HE", "H-E", "H& E", "H &E", "H & E", "H&E", "H&Ε"}:
         return "H&E"
     return t_raw.strip()
 
 
-def build_datamatrix(
-    lab: object,
-    year: object,
-    case: object,
-    pot: object,
-    blockid: object,
-    section: object,
-) -> Optional[str]:
-    """Build DataMatrix using the standard logic.
-
-    Pattern: {LabID}{Year4}{Case6}S{Pot}-{BlockID}-{Section}
-    Returns None if any required field is missing.
-    """
+def build_datamatrix(lab, year, case, pot, blockid, section) -> Optional[str]:
+    """Build DataMatrix per template: {LabID}{Year4}{Case6}S{Pot}-{BlockID}-{Section}"""
     lab_s = (str(lab).strip().upper() if lab else "")
     y4 = to_year4_str(year)
     c6 = to_case6_str(case)
@@ -167,177 +165,250 @@ def build_datamatrix(
 
 
 def prefer_ext(candidates: List[Path]) -> Optional[Path]:
-    """Among multiple 'base.*' matches, prefer typical WSI formats first."""
     if not candidates:
         return None
     priority = [".svs", ".ndpi", ".scn", ".mrxs", ".bif", ".tif", ".tiff", ".png", ".jpg", ".jpeg"]
-    cand_by_ext = {p.suffix.lower(): p for p in candidates}
+    cand_map = {p.suffix.lower(): p for p in candidates}
     for ext in priority:
-        if ext in cand_by_ext:
-            return cand_by_ext[ext]
+        if ext in cand_map:
+            return cand_map[ext]
     return candidates[0]
 
 
 def unique_path(target: Path) -> Path:
-    """If a target path exists, append _1, _2, ... until unique."""
     if not target.exists():
         return target
-    stem, suf = target.stem, target.suffix
-    parent = target.parent
     i = 1
+    stem, suf = target.stem, target.suffix
     while True:
-        cand = parent / f"{stem}_{i}{suf}"
+        cand = target.with_name(f"{stem}_{i}{suf}")
         if not cand.exists():
             return cand
         i += 1
 
 
 def read_excel_safe(path: Path) -> pd.DataFrame:
-    """Read Excel as TEXT to avoid float coercion; return empty DataFrame on failure."""
     try:
         return pd.read_excel(path, dtype=str)
     except Exception as exc:  # noqa: BLE001
-        logger.error(f"[ERROR] Cannot read Excel: {path} -> {exc}")
+        logger.warning(f"[WARN] Cannot read Excel: {path} -> {exc}")
         return pd.DataFrame()
 
 
-def ensure_metadata_schema(df: Optional[pd.DataFrame]) -> pd.DataFrame:
-    """Ensure slide_metadata.csv has required columns (without 'Status')."""
-    cols = ["FileName", "SlideID", "CaseID", "NewFileName", "OriginalFileName", "method of extraction"]
-    if df is None or df.empty:
-        return pd.DataFrame(columns=cols)
-    for c in cols:
-        if c not in df.columns:
-            df[c] = None
-    return df[cols].copy()
+def atomic_write_excel(dfs: Dict[str, pd.DataFrame], path: Path) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with pd.ExcelWriter(tmp, engine="openpyxl") as xw:
+        for name, df in dfs.items():
+            (df if df is not None else pd.DataFrame()).to_excel(
+                xw, sheet_name=name, index=False
+            )
+    os.replace(tmp, path)
 
 
-def prefer_ext_local(candidates: List[Path]) -> Optional[Path]:
-    """Prefer best WSI extension among base.* matches (local shadow helper)."""
-    if not candidates:
+# --------------------------- Timestamp helpers ---------------------------
+
+def _utc_ts_iso_z() -> str:
+    """UTC now in ISO-Z without microseconds, e.g., 2025-10-02T12:00:00Z"""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _scan_ts_iso_z_from_metadata(path: Path) -> Optional[str]:
+    """
+    Extract REAL scan time from slide metadata.
+
+    Rules:
+        - Aperio (GT450):
+            * aperio.Date       = "MM/DD/YYYY"
+            * aperio.Time       = "HH:MM:SS"
+            * aperio.Time Zone  = "GMT+0100" (or similar)
+          We parse local time and convert to UTC.
+        - Hamamatsu:
+            * hamamatsu.Created = "YYYY/MM/DD"  (preferred)
+            * or hamamatsu.Updated = "YYYY/MM/DD"
+            * tiff.DateTime     = "YYYY:MM:DD HH:MM:SS"
+          Here we treat the timestamp as already UTC (no extra offset logic),
+          because timezone is usually not encoded explicitly.
+
+        - NO FALLBACK:
+            If metadata keys are missing or parsing fails, return None.
+    """
+    if openslide is None:
+        logger.warning("[WARN] OpenSlide not available; cannot read ScanTime_UTC from metadata.")
         return None
-    priority = [".svs", ".ndpi", ".scn", ".mrxs", ".bif", ".tif", ".tiff", ".png", ".jpg", ".jpeg"]
-    cand_by_ext = {p.suffix.lower(): p for p in candidates}
-    for ext in priority:
-        if ext in cand_by_ext:
-            return cand_by_ext[ext]
-    return candidates[0]
+
+    try:
+        slide = openslide.OpenSlide(str(path))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[WARN] Cannot open slide for metadata: {path} -> {exc}")
+        return None
+
+    props = dict(slide.properties)
+    vendor = props.get("openslide.vendor", "").lower().strip()
+
+    # --- Aperio branch ---
+    if vendor == "aperio":
+        date_str = props.get("aperio.Date")
+        time_str = props.get("aperio.Time")
+        tz_str = props.get("aperio.Time Zone")
+        if date_str and time_str and tz_str:
+            try:
+                dt_date = datetime.strptime(date_str, "%m/%d/%Y")
+                dt_time = datetime.strptime(time_str, "%H:%M:%S").time()
+                # tz_str like "GMT+0100"
+                offset = timezone.utc
+                m = re.match(r"GMT([+-])(\d{2})(\d{2})", tz_str)
+                if m:
+                    sign = 1 if m.group(1) == "+" else -1
+                    hours = int(m.group(2))
+                    minutes = int(m.group(3))
+                    delta = timedelta(hours=hours, minutes=minutes)
+                    offset = timezone(sign * delta)
+                local_dt = datetime(
+                    year=dt_date.year,
+                    month=dt_date.month,
+                    day=dt_date.day,
+                    hour=dt_time.hour,
+                    minute=dt_time.minute,
+                    second=dt_time.second,
+                    tzinfo=offset,
+                )
+                utc_dt = local_dt.astimezone(timezone.utc)
+                return utc_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[WARN] Failed to parse Aperio scan time: {exc}")
+
+    # --- Hamamatsu branch ---
+    # Prefer hamamatsu.Created / Updated for date, tiff.DateTime for time if available
+    if vendor == "hamamatsu" or True:
+        date_hama = props.get("hamamatsu.Created") or props.get("hamamatsu.Updated")
+        dt_str = props.get("tiff.DateTime")
+        # tiff.DateTime example: "2025:08:25 12:18:29"
+        if date_hama and dt_str:
+            try:
+                # we ignore date_hama and use full tiff.DateTime (contains date+time)
+                dt = datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S")
+                # Treat as UTC directly (scanner time already in UTC)
+                dt = dt.replace(tzinfo=timezone.utc)
+                return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[WARN] Failed to parse Hamamatsu tiff.DateTime: {exc}")
+
+        if date_hama and not dt_str:
+            # Only a date, no time; treat as 00:00:00 UTC
+            try:
+                dt = datetime.strptime(date_hama, "%Y/%m/%d")
+                dt = dt.replace(tzinfo=timezone.utc)
+                return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[WARN] Failed to parse Hamamatsu Created/Updated: {exc}")
+
+    # If we reach here, no readable scan time
+    return None
 
 
-def atomic_write_csv(df: pd.DataFrame, path: Path) -> None:
-    """Write CSV atomically (temp file + os.replace)."""
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    df.to_csv(tmp_path, index=False)
-    os.replace(tmp_path, path)
+# --------------------------- Config ---------------------------
 
+@dataclass(frozen=True)
+class ConfigPaths:
+    source_dir: Path
+    renamed_dir: Path
+    failed_dir: Path
+    dm_excel: Path
+    stain_excel: Path
+    meta_xlsx: Path
+    dry_run: bool
+    ts_enabled: bool
 
-# --------------------------------------------------------------------------- #
-# Core Pipeline
-# --------------------------------------------------------------------------- #
 
 def load_config(config_path: Path) -> Dict:
-    """Load YAML configuration file."""
     with open(config_path, "r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
 
 
 def materialize_paths(cfg: Dict) -> ConfigPaths:
-    """Construct and ensure all paths from config without changing original behavior."""
-    timestamp = cfg.get("run_timestamp", datetime.now().strftime("%Y-%m-%d_%H-%M"))
-    output_run_dir = Path(cfg.get("output_run_dir", Path(cfg["run_output_dir"]) / timestamp))
-    output_run_dir.mkdir(parents=True, exist_ok=True)
-
     source_dir = Path(cfg["staging_dir"])
     renamed_dir = Path(cfg["final_output_dir"])
     failed_dir = Path(cfg["failed_output_dir"])
-
     for d in (renamed_dir, failed_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    dm_path = Path(cfg.get("datamatrix_output_excel", output_run_dir / f"datamatrix_results_{timestamp}.xlsx"))
-    stain_path = Path(cfg.get("stain_output_excel", output_run_dir / f"stain_results_{timestamp}.xlsx"))
-    metadata_csv = Path(cfg["metadata_csv_path"])
-    metadata_csv.parent.mkdir(parents=True, exist_ok=True)
+    dm_excel = Path(cfg.get("datamatrix_output_excel", "")) if cfg.get("datamatrix_output_excel") else Path()
+    stain_excel = Path(cfg.get("stain_output_excel", "")) if cfg.get("stain_output_excel") else Path()
+
+    meta_xlsx = Path(cfg.get("metadata_excel_path", "slide_metadata.xlsx"))
+    meta_xlsx.parent.mkdir(parents=True, exist_ok=True)
+
+    dry_run = bool(cfg.get("dry_run", False))
+    ts_enabled = bool(cfg.get("timestamp_tag_enabled", False))
 
     return ConfigPaths(
-        output_run_dir=output_run_dir,
         source_dir=source_dir,
         renamed_dir=renamed_dir,
         failed_dir=failed_dir,
-        datamatrix_excel=dm_path,
-        stain_excel=stain_path,
-        metadata_csv=metadata_csv,
-        timestamp=timestamp,
+        dm_excel=dm_excel,
+        stain_excel=stain_excel,
+        meta_xlsx=meta_xlsx,
+        dry_run=dry_run,
+        ts_enabled=ts_enabled,
     )
 
 
-def infer_method(row: pd.Series) -> str:
-    """Infer 'method of extraction' based on ExtractionMethod value."""
-    em = str(row.get("ExtractionMethod") or "").strip().lower()
-    return "ROIbase" if em == "roibase" else "Datamatrix"
+# --------------------------- Pipeline ---------------------------
 
+def merge_inputs(dm_path: Path, stain_path: Path) -> pd.DataFrame:
+    """
+    Merge upstream Excel files on 'FileName'; keep ALL DM columns,
+    but from Stain input keep ONLY the final 'Stain' column.
+    """
+    df_dm = read_excel_safe(dm_path) if dm_path and dm_path.exists() else pd.DataFrame()
+    df_st = read_excel_safe(stain_path) if stain_path and stain_path.exists() else pd.DataFrame()
 
-def pick_source_and_dest(
-    base: str,
-    slide_id: str,
-    case_id: str,
-    source_dir: Path,
-    renamed_dir: Path,
-) -> Tuple[Optional[Path], Optional[Path]]:
-    """Find source WSI in staging and compute destination unique path."""
-    matches = list(source_dir.glob(base + ".*"))
-    if not matches:
-        return None, None
-    src_file = prefer_ext_local(matches) or matches[0]
-    safe_slideid = sanitize_fs(slide_id)
-    dst_folder = renamed_dir / str(case_id)
-    dst_folder.mkdir(parents=True, exist_ok=True)
-    target = dst_folder / f"{safe_slideid}{src_file.suffix}"
-    return src_file, unique_path(target)
-
-
-def run_pipeline(cfg: Dict) -> None:
-    """Execute the original pipeline logic with structural improvements only."""
-    paths = materialize_paths(cfg)
-
-    # 1) Load inputs
-    df_dm = read_excel_safe(paths.datamatrix_excel)
-    df_stain = read_excel_safe(paths.stain_excel)
-
-    need_dm_cols = [
-        "FileName",
-        "DataMatrix",
-        "LabID",
-        "Year",
-        "CaseNumber",
-        "Pot",
-        "BlockID",
-        "Section",
-        "ExtractionMethod",
-    ]
-    for c in need_dm_cols:
+    # --- Ensure DM skeleton exists & required DM keys (we keep ALL DM columns as-is) ---
+    for c in ["FileName", "DataMatrix", "LabID", "Year", "CaseNumber", "Pot", "BlockID", "Section", "ExtractionMethod"]:
         if c not in df_dm.columns:
             df_dm[c] = None
 
-    df_dm = df_dm.dropna(subset=["FileName", "LabID", "Year", "CaseNumber"]).copy()
+    if "FileName" not in df_dm.columns:
+        # If DM is missing but Stain has FileName, bootstrap skeleton to keep pipeline flowing
+        if not df_st.empty and "FileName" in df_st.columns:
+            df_dm = df_st[["FileName"]].drop_duplicates().copy()
+            for c in ["DataMatrix", "LabID", "Year", "CaseNumber", "Pot", "BlockID", "Section", "ExtractionMethod"]:
+                df_dm[c] = None
+        else:
+            df_dm["FileName"] = []
 
-    if "Stain" not in df_stain.columns:
-        df_stain["Stain"] = None
-    df_stain = df_stain[["FileName", "Stain"]].drop_duplicates()
+    # --- From Stain: keep ONLY the final Stain per FileName ---
+    if not df_st.empty and "FileName" in df_st.columns:
+        stain_col = "Stain" if "Stain" in df_st.columns else None
+        if stain_col is None:
+            df_st_min = pd.DataFrame(columns=["FileName", "Stain"])
+        else:
+            df_st_min = df_st[["FileName", stain_col]].rename(columns={stain_col: "Stain"})
+            df_st_min = df_st_min.dropna(subset=["Stain"])
+            df_st_min = df_st_min.drop_duplicates(subset=["FileName"], keep="last")
+    else:
+        df_st_min = pd.DataFrame(columns=["FileName", "Stain"])
 
-    # 2) Merge stain (LEFT)
-    df = pd.merge(df_dm, df_stain, on="FileName", how="left")
+    # LEFT merge: DM (all cols) + ONLY Stain
+    df = pd.merge(df_dm, df_st_min, on="FileName", how="left")
+    return df
 
-    # 3) Normalize & compute derived fields (unchanged logic)
+
+def compute_identifiers(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute CaseID, SlideID; rebuild DataMatrix if needed; normalize stain."""
+    df = df.copy()
+
     df["LabID"] = df["LabID"].astype(str).str.strip().str.upper()
     df["Year4"] = df["Year"].apply(to_year4_str).astype("string")
     df["Case6"] = df["CaseNumber"].apply(to_case6_str).astype("string")
     df["Pot"] = df["Pot"].fillna("A").astype(str).str.strip().str.upper().astype("string")
     df["BlockID"] = df["BlockID"].apply(lambda x: to_int_str_no_decimal(x) or "1").astype("string")
     df["Section"] = df["Section"].apply(lambda x: to_int_str_no_decimal(x) or "1").astype("string")
+
+    # Stain normalization
     df["Stain"] = df["Stain"].apply(normalize_stain).astype("string")
 
-    # 4) Rebuild/normalize DataMatrix (keep original if rebuild fails)
+    # Rebuild DataMatrix if missing/invalid
     df["DataMatrix_v2"] = df.apply(
         lambda r: build_datamatrix(r["LabID"], r["Year4"], r["Case6"], r["Pot"], r["BlockID"], r["Section"]),
         axis=1,
@@ -347,108 +418,270 @@ def run_pipeline(cfg: Dict) -> None:
     )
     df.drop(columns=["DataMatrix_v2"], inplace=True)
 
-    # 5) IDs
     df["CaseID"] = (df["LabID"].fillna("") + df["Year4"].fillna("") + df["Case6"].fillna("")).astype("string")
     df["Stain"] = df["Stain"].fillna("H&E")
-    df["SlideID"] = (df["DataMatrix"].astype(str) + "-" + df["Stain"].astype(str)).astype("string")
 
-    # 6) method of extraction
-    df["method of extraction"] = df.apply(infer_method, axis=1).astype("string")
+    # IMPORTANT: do NOT generate "nan-H&E" SlideIDs.
+    # Only create SlideID when DataMatrix is present and not 'nan'.
+    dm_series = df["DataMatrix"]
+    dm_str = dm_series.astype(str)
+    valid_mask = dm_str.str.strip().ne("") & dm_str.str.strip().str.lower().ne("nan")
+    df["SlideID"] = ""
+    df.loc[valid_mask, "SlideID"] = (
+        dm_str[valid_mask].astype(str) + "-" + df["Stain"][valid_mask].astype(str)
+    )
 
-    # 7) Original base name (from label image name)
-    df["OriginalBase"] = df["FileName"].str.replace(r"\.(png|jpg|jpeg)$", "", regex=True)
+    # Robust base-name extraction for ANY extension (svs, ndpi, tif, ...)
+    df["OriginalBase"] = df["FileName"].apply(lambda s: Path(str(s)).stem)
+    df["method of extraction"] = df.get("ExtractionMethod", "").astype(str).str.strip().apply(
+        lambda em: "ROIbase" if em.lower() == "roibase" else "Datamatrix"
+    )
+    return df
 
-    # 8) Build new filename by finding the actual WSI in staging
-    moved_files: List[str] = []
+
+def pick_source_and_dest(
+    base: str,
+    slide_id: str,
+    case_id: str,
+    source_dir: Path,
+    renamed_dir: Path,
+) -> Tuple[Optional[Path], Optional[Path]]:
+    """Find source by base.* and destination path under renamed/case_id/slide_id.ext"""
+    base = Path(str(base)).stem
+    matches = list(source_dir.glob(base + ".*"))
+    if not matches:
+        return None, None
+    src_file = prefer_ext(matches) or matches[0]
+
+    dst_folder = renamed_dir / str(case_id)
+    dst_folder.mkdir(parents=True, exist_ok=True)
+    dst_file = unique_path(dst_folder / f"{slide_id}{src_file.suffix}")
+    return src_file, dst_file
+
+
+def run_pipeline(cfg: Dict) -> None:
+    """
+    SlideID generator pipeline.
+
+    - Reads merged DataMatrix + stain Excel
+    - Computes identifiers (CaseID, SlideID, etc.)
+    - Renames/moves WSIs into final tree
+    - Produces:
+        * Excel: slide_metadata.xlsx (sheet: full_merged) for THIS run only
+          enriched with ScanTime_UTC, AnalysisTime_UTC, InputPath, OutputPath, status.
+    """
+    paths = materialize_paths(cfg)
+
+    # 2) Merge DataMatrix and Stain inputs, then compute identifiers
+    df_merge = merge_inputs(paths.dm_excel, paths.stain_excel)
+    if df_merge.empty:
+        logger.warning("[WARN] Merged inputs are empty; nothing to process.")
+    df = compute_identifiers(df_merge).fillna("")
+
+    # Analysis time (one per run)
+    analysis_ts = _utc_ts_iso_z()
+    runtime_value = str(cfg.get("run_timestamp", analysis_ts))
+
+    moved: List[str] = []
     records: List[Dict[str, str]] = []
 
+    # 3) File renaming loop
     for _, row in df.iterrows():
-        src_file, dst_file = pick_source_and_dest(
-            base=str(row["OriginalBase"]),
-            slide_id=str(row["SlideID"]),
-            case_id=str(row["CaseID"]),
+        original_base = str(row.get("OriginalBase", ""))
+        slide_id_raw = str(row.get("SlideID") or "").strip()
+        case_id = str(row.get("CaseID") or "").strip()
+
+        # Determine source file by base.* regardless of SlideID validity
+        matches = list(paths.source_dir.glob(Path(original_base).stem + ".*"))
+        if not matches:
+            logger.info(f"[MISS] No WSI found for base: {original_base}")
+            continue
+
+        src_file = prefer_ext(matches) or matches[0]
+        input_path = str(src_file)
+
+        # Extract ScanTime_UTC from metadata (no fallback)
+        scan_ts = _scan_ts_iso_z_from_metadata(src_file)
+        scan_ts_str = scan_ts or ""
+
+        # If SlideID is missing/invalid, send to failed/ without renaming to 'nan_H&E'
+        slideid_valid = bool(slide_id_raw) and not slide_id_raw.lower().startswith("nan-")
+
+        if not slideid_valid or not case_id:
+            # Move to failed/
+            status = "failed"
+            if not paths.dry_run:
+                dst_failed = unique_path(paths.failed_dir / src_file.name)
+                try:
+                    shutil.move(str(src_file), str(dst_failed))
+                    moved.append(src_file.name)
+                    logger.info(f"[FAILED] {src_file.name} -> {dst_failed.name}")
+                    output_path = str(dst_failed)
+                    new_name = dst_failed.name
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[WARN] Could not move failed file {src_file}: {exc}")
+                    output_path = ""
+                    new_name = ""
+            else:
+                logger.info(f"[DRYRUN-FAILED] Would move {src_file.name} -> failed/")
+                output_path = ""
+                new_name = ""
+
+            records.append(
+                {
+                    "FileName": str(row.get("FileName", "")),
+                    "SlideID": slide_id_raw,
+                    "CaseID": case_id,
+                    "OriginalFileName": src_file.name,
+                    "NewFileName": new_name,
+                    "InputPath": input_path,
+                    "OutputPath": output_path,
+                    "ScanTime_UTC": scan_ts_str,
+                    "AnalysisTime_UTC": analysis_ts,
+                    "method of extraction": str(row.get("method of extraction", "metadata")),
+                    "status": status,
+                }
+            )
+            continue
+
+        # SlideID is valid: build final SlideID used for renaming + registry
+        ts_suffix = ""
+        if paths.ts_enabled and scan_ts_str:
+            ts_suffix = f"_UTC{scan_ts_str}"
+
+        effective_slide_id = sanitize_fs(slide_id_raw + ts_suffix)
+
+        # Determine destination path under CaseID tree
+        src_file2, dst_file = pick_source_and_dest(
+            base=original_base,
+            slide_id=effective_slide_id,
+            case_id=case_id,
             source_dir=paths.source_dir,
             renamed_dir=paths.renamed_dir,
         )
+
+        # Defensive: src_file2 should equal src_file, but use it if available
+        if src_file2 is not None:
+            src_file = src_file2
+
         if src_file is None or dst_file is None:
-            logger.warning(f"[WARN] Source file not found in staging for base: {row.get('OriginalBase')}")
-            continue
-        try:
-            shutil.move(str(src_file), str(dst_file))
-            moved_files.append(src_file.name)
-            records.append(
-                {
-                    "FileName": str(row["FileName"]),
-                    "SlideID": sanitize_fs(str(row["SlideID"])),
-                    "CaseID": str(row["CaseID"]),
-                    "OriginalFileName": src_file.name,
-                    "NewFileName": dst_file.name,
-                    "method of extraction": str(row.get("method of extraction", "metadata")),
-                }
-            )
-            logger.info(f"[RENAMED] {src_file.name}  ->  {dst_file}")
-        except Exception as exc:  # noqa: BLE001
-            logger.error(f"[ERROR] Could not move {src_file} to {dst_file}: {exc}")
-
-    # 9) Move unmatched files to failed/
-    for file in paths.source_dir.glob("*"):
-        if file.is_file() and (file.name not in moved_files):
-            try:
-                shutil.move(str(file), str(paths.failed_dir / file.name))
-                logger.info(f"[INFO] Moved unmatched file to failed: {paths.failed_dir / file.name}")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[WARN] Could not move unmatched {file.name} to failed: {exc}")
-
-    # 10) Update slide_metadata.csv (append or upsert by SlideID) — WITHOUT 'Status'
-    try:
-        if paths.metadata_csv.exists():
-            meta = pd.read_csv(paths.metadata_csv)
-            cols = ["FileName", "SlideID", "CaseID", "NewFileName", "OriginalFileName", "method of extraction"]
-            for c in cols:
-                if c not in meta.columns:
-                    meta[c] = None
-            meta = meta[cols]
+            logger.info(f"[MISS] No WSI found for base (rename step): {original_base}")
+            status = "failed"
+            output_path = ""
+            new_name = ""
         else:
-            meta = pd.DataFrame(
-                columns=["FileName", "SlideID", "CaseID", "NewFileName", "OriginalFileName", "method of extraction"]
-            )
+            if not paths.dry_run:
+                try:
+                    shutil.move(str(src_file), str(dst_file))
+                    moved.append(src_file.name)
+                    logger.info(f"[OK] {src_file.name} -> {dst_file.name}")
+                    status = "success"
+                    output_path = str(dst_file)
+                    new_name = dst_file.name
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[WARN] Could not move {src_file} -> {dst_file}: {exc}")
+                    status = "failed"
+                    output_path = ""
+                    new_name = ""
+            else:
+                logger.info(f"[DRYRUN] Would move {src_file.name} -> {dst_file.name}")
+                status = "success"
+                output_path = str(dst_file)
+                new_name = dst_file.name
 
-        df_run = pd.DataFrame.from_records(
-            records,
-            columns=["FileName", "SlideID", "CaseID", "OriginalFileName", "NewFileName", "method of extraction"],
+        records.append(
+            {
+                "FileName": str(row.get("FileName", "")),
+                "SlideID": effective_slide_id,
+                "CaseID": case_id,
+                "OriginalFileName": src_file.name if src_file else "",
+                "NewFileName": new_name,
+                "InputPath": input_path,
+                "OutputPath": output_path,
+                "ScanTime_UTC": scan_ts_str,
+                "AnalysisTime_UTC": analysis_ts,
+                "method of extraction": str(row.get("method of extraction", "metadata")),
+                "status": status,
+            }
         )
 
-        if not meta.empty and "SlideID" in meta.columns:
-            new_ids = set(df_run["SlideID"].astype(str))
-            meta = meta[~meta["SlideID"].astype(str).isin(new_ids)]
+    # 4) Move unmatched source files into failed/ (safety net)
+    if not paths.dry_run:
+        for file in paths.source_dir.glob("*"):
+            if file.is_file() and (file.name not in moved):
+                try:
+                    shutil.move(str(file), str(paths.failed_dir / file.name))
+                    logger.info(f"[INFO] -> failed/: {file.name}")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[WARN] Could not move unmatched {file.name}: {exc}")
+    else:
+        logger.info("[DRYRUN] Skip moving unmatched files to failed/.")
 
-        meta_updated = pd.concat([meta, df_run], ignore_index=True)
+    # 5) Build per-run full_merged DataFrame (Excel view)
+    try:
+        df_records = pd.DataFrame.from_records(records)
+    except Exception:  # noqa: BLE001
+        df_records = pd.DataFrame()
 
-        # Atomic write
-        atomic_write_csv(meta_updated, paths.metadata_csv)
-        logger.info(f"[OK] slide_metadata.csv updated: {paths.metadata_csv}")
+    try:
+        df_excel = df.copy()
+
+        # Merge record-level info (NewFileName, paths, times, status) by FileName
+        if not df_records.empty and "FileName" in df_excel.columns:
+            cols_for_merge = [
+                "FileName",
+                "OriginalFileName",
+                "NewFileName",
+                "InputPath",
+                "OutputPath",
+                "ScanTime_UTC",
+                "AnalysisTime_UTC",
+                "status",
+            ]
+            cols_for_merge = [c for c in cols_for_merge if c in df_records.columns]
+            df_excel = df_excel.merge(
+                df_records[cols_for_merge],
+                on="FileName",
+                how="left",
+            )
+
+        # Add RunTime as a constant column for this run
+        df_excel["RunTime"] = runtime_value
+
+        # Drop columns that must NOT appear in full_merged
+        drop_cols = ["Year4", "Case6", "ExtractionMethod"]
+        for col in drop_cols:
+            if col in df_excel.columns:
+                df_excel = df_excel.drop(columns=[col])
+
+        df_excel = df_excel.fillna("")
     except Exception as exc:  # noqa: BLE001
-        logger.warning(f"[WARN] Could not update slide_metadata.csv: {exc}")
+        logger.warning(f"[WARN] Could not build full_merged DataFrame: {exc}")
+        df_excel = df.copy().fillna("")
 
-    logger.info("[DONE] SlideIDcreator finished.")
+    # 6) Write Excel (per-run, single sheet: full_merged)
+    try:
+        dfs = {"full_merged": df_excel}
+        atomic_write_excel(dfs, paths.meta_xlsx)
+        logger.info(f"[OK] Excel (full_merged) saved: {paths.meta_xlsx}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[WARN] Could not write Excel: {exc}")
+
+    logger.info("[DONE] slide_id_generator finished.")
 
 
-# --------------------------------------------------------------------------- #
-# CLI
-# --------------------------------------------------------------------------- #
+# --------------------------- CLI ---------------------------
 
 def cli(argv: Optional[List[str]] = None) -> int:
-    """Command-line interface with subcommands (run/validate/version)."""
-    parser = argparse.ArgumentParser(description="SlideID Generator (structure-only refactor)")
+    parser = argparse.ArgumentParser(description="Slide ID generator & Excel writer")
     sub = parser.add_subparsers(dest="command", required=True)
-
-    p_run = sub.add_parser("run", help="Run pipeline with the given config")
+    p_run = sub.add_parser("run", help="Run pipeline with config")
     p_run.add_argument("--config", type=str, required=True, help="Path to config YAML")
-    p_run.add_argument("--log-level", type=str, default="INFO", help="Logging level (default: INFO)")
+    p_run.add_argument("--log-level", type=str, default="INFO", help="Logging level")
 
-    p_val = sub.add_parser("validate", help="Validate config YAML keys and paths")
+    p_val = sub.add_parser("validate", help="Validate config and paths")
     p_val.add_argument("--config", type=str, required=True, help="Path to config YAML")
-    p_val.add_argument("--log-level", type=str, default="INFO", help="Logging level (default: INFO)")
+    p_val.add_argument("--log-level", type=str, default="INFO", help="Logging level")
 
     sub.add_parser("version", help="Show version")
 
@@ -456,41 +689,36 @@ def cli(argv: Optional[List[str]] = None) -> int:
 
     if args.command == "version":
         setup_logging("INFO")
-        logger.info(VERSION)
+        logger.info("slide_id_generator 2.0.0")
         return 0
 
     if args.command in {"run", "validate"}:
         setup_logging(args.log_level)
-
         cfg_path = Path(args.config)
         if not cfg_path.exists():
             logger.error(f"[ERROR] Config file not found: {cfg_path}")
             return 2
-
         try:
             cfg = load_config(cfg_path)
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[ERROR] Failed to load config: {exc}")
             return 2
 
-        required_keys = [
-            "run_output_dir",
-            "staging_dir",
-            "final_output_dir",
-            "failed_output_dir",
-            "metadata_csv_path",
-        ]
+        # Initialize OpenSlide from config (dll_paths.openslide_dll)
+        dll_cfg = (cfg.get("dll_paths") or {})
+        dll_path = dll_cfg.get("openslide_dll")
+        _setup_openslide(dll_path)
 
-        missing = [k for k in required_keys if k not in cfg]
+        required = ["staging_dir", "final_output_dir", "failed_output_dir"]
+        missing = [k for k in required if k not in cfg]
         if missing:
-            logger.error(f"[ERROR] Missing required config keys: {', '.join(missing)}")
+            logger.error(f"[ERROR] Missing config keys: {', '.join(missing)}")
             return 2
 
-        # Probe path existence for folders that must exist or will be created
         try:
-            _ = materialize_paths(cfg)  # also ensures dirs as original behavior
+            _ = materialize_paths(cfg)
         except Exception as exc:  # noqa: BLE001
-            logger.error(f"[ERROR] Invalid config values (paths?): {exc}")
+            logger.error(f"[ERROR] Invalid path values: {exc}")
             return 2
 
         if args.command == "validate":
@@ -501,13 +729,8 @@ def cli(argv: Optional[List[str]] = None) -> int:
             run_pipeline(cfg)
             return 0
 
-    # Should not reach here
     return 1
 
-
-# --------------------------------------------------------------------------- #
-# Script execution guard
-# --------------------------------------------------------------------------- #
 
 if __name__ == "__main__":
     sys.exit(cli())

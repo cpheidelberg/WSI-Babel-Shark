@@ -33,6 +33,7 @@ from .utils.io_utils import (
 )
 from .extractor import RoiMetadataExtractor
 from .report.pdf_report import _write_pdf_report
+from .parsing.text_utils import to_year4_str, build_datamatrix  # NEW: for rebuilding DataMatrix with updated Section
 
 
 __MODULE_PROG__ = "ROI-OCR-Based-Metadata-Extractor"
@@ -241,14 +242,17 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     # Output locations
     out_base = cfg.get("run_output_dir") or "./output"
-    run_tag = _timestamp()
+    # ---- FIX B (stable tag from runner; fallback to new timestamp) ----
+    run_tag = cfg.get("run_timestamp") or _timestamp()
     out_run = cfg.get("output_run_dir") or os.path.join(out_base, run_tag)
     out_run = ensure_dir(out_run)
 
+    # Keep CSVs time-stamped (optional), but XLSX/PDF must be fixed within a run
     results_csv = cfg.get("output_csv") or os.path.join(out_run, f"roi_results_{run_tag}.csv")
     words_csv = cfg.get("words_csv") or os.path.join(out_run, f"roi_words_wide_{run_tag}.csv")
-    results_xlsx = cfg.get("output_xlsx") or os.path.join(out_run, f"roi_results_{run_tag}.xlsx")
-    results_pdf = cfg.get("output_pdf") or os.path.join(out_run, f"roi_results_{run_tag}.pdf")
+    # ---- FIX B (fixed names for XLSX/PDF to avoid proliferation inside same run) ----
+    results_xlsx = cfg.get("output_xlsx") or os.path.join(out_run, "roi_results.xlsx")
+    results_pdf = cfg.get("output_pdf") or os.path.join(out_run, "roi_results.pdf")
 
     # Input resolution (supports explicit label dirs or DM-failed)
     try:
@@ -300,6 +304,10 @@ def cmd_run(args: argparse.Namespace) -> None:
     rows_words: List[Dict[str, str]] = []
     pxl_offset = int(cfg.get("pxl_offset", 8))
 
+    # Section counters for cases where Section stayed at default "500"
+    # Key: (LabID, Year, CaseNumber, Pot, BlockID) -> last assigned Section
+    section_counters: Dict[Tuple[str, str, str, str, str], int] = {}
+
     import time
     start_t = time.time()
 
@@ -320,6 +328,36 @@ def cmd_run(args: argparse.Namespace) -> None:
             img_name=bname,
             pxl_offset=pxl_offset,
         )
+
+        # Adjust Section when OCR could not read it (default "500")
+        sec_val = (parsed.get("Section") or "").strip()
+        if sec_val == "500":
+            core_key = (
+                parsed.get("LabID", "") or "",
+                parsed.get("Year", "") or "",
+                parsed.get("CaseNumber", "") or "",
+                parsed.get("Pot", "") or "",
+                parsed.get("BlockID", "") or "",
+            )
+            if core_key not in section_counters:
+                section_counters[core_key] = 500
+            else:
+                section_counters[core_key] += 1
+            new_section = section_counters[core_key]
+            parsed["Section"] = str(new_section)
+
+            y4 = to_year4_str(parsed.get("Year"))
+            dm_new = build_datamatrix(
+                parsed.get("LabID"),
+                y4,
+                parsed.get("CaseNumber"),
+                parsed.get("Pot"),
+                parsed.get("BlockID"),
+                parsed.get("Section"),
+            )
+            if dm_new:
+                parsed["DataMatrix"] = dm_new
+                success = True
 
         rows_results.append(_collect_rows_for_results(fp, parsed, success))
         ww: Dict[str, str] = {"FileName": bname}
@@ -343,75 +381,48 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     try:
         _write_pdf_report(results_pdf, df_res, df_words, title="ROI Fallback Results")
+        logging.info("Wrote PDF: %s", results_pdf)
     except Exception as e:
         logging.warning("Could not write PDF: %s", e)
 
 
-# ----------------------------------------------- CLI ----------------------------------------------- #
-def _build_cli(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
-    """Build the argparse CLI and parse arguments.
+# ------------------------------------------- CLI ------------------------------------------- #
 
-    Subcommands:
-      - run: Execute the extractor over an input directory.
-      - version: Print module version and exit.
-
-    Args:
-        argv: Optional iterable of arguments; defaults to `sys.argv[1:]` if None.
-
-    Returns:
-        Parsed `argparse.Namespace`.
-    """
-    parser = argparse.ArgumentParser(
-        prog=__MODULE_PROG__,
-        description="ROI-based metadata extractor aligned with pipeline.",
-    )
+def _build_cli(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Build CLI for this module."""
+    parser = argparse.ArgumentParser(prog=__MODULE_PROG__, description="ROI metadata extractor (fallback).")
     sub = parser.add_subparsers(dest="command")
 
-    p_run = sub.add_parser("run", help="Run extractor over images in the chosen input directory.")
-    p_run.add_argument("--config", type=str, required=True, help="YAML config file.")
-    p_run.add_argument("--input-dir", dest="input_dir", type=str, help="Override input directory.")
-    p_run.add_argument("--roi-json", dest="roi_json", type=str, help="Use a fixed ROI JSON file.")
-    p_run.add_argument("--pxl-offset", dest="pxl_offset", type=int, help="Extra padding pixels for ROI crop.")
-    p_run.add_argument(
-        "--debug-folder",
-        dest="debug_folder",
-        type=str,
-        help="Override debug_parts_root (see debug_save_mode).",
-    )
-    p_run.add_argument("--log-level", type=str, default="INFO", help="Log level.")
+    p_run = sub.add_parser("run", help="Run extraction over a folder of label images.")
+    p_run.add_argument("--config", type=str, required=True, help="Path to YAML/JSON config file.")
+    p_run.add_argument("--input-dir", dest="input_dir", type=str, default="", help="Override input folder (images).")
+    p_run.add_argument("--roi-json", dest="roi_json", type=str, default="", help="Override ROI JSON path.")
+    p_run.add_argument("--pxl-offset", dest="pxl_offset", type=int, default=None, help="Padding pixels for ROI crops.")
+    p_run.add_argument("--debug-folder", dest="debug_folder", type=str, default="", help="Where to save debug parts.")
+    p_run.add_argument("--log-level", dest="log_level", type=str, default="INFO", help="Logging level.")
 
     sub.add_parser("version", help="Print version and exit.")
 
-    # If argv is None, argparse uses sys.argv[1:] automatically
     args = parser.parse_args(argv)
     return args
 
 
-def main(argv: Optional[Iterable[str]] = None) -> int:
-    """Main entry point.
-
-    Dispatches to `version` or `run` based on parsed subcommand.
-    Prints usage hint and returns code 2 when no subcommand is provided.
-
-    Args:
-        argv: Optional iterable of CLI arguments.
-
-    Returns:
-        Process exit code: 0 on success; 2 for missing/unknown subcommand.
-    """
+def main(argv: Optional[List[str]] = None) -> int:
     args = _build_cli(argv)
+
     if args.command == "version":
         setup_logging("INFO")
-        logging.info(__VERSION__)
+        logging.info("version: 1.0.0")
         return 0
+
     if args.command == "run":
         cmd_run(args)
         return 0
+
     setup_logging("INFO")
-    logging.info("Use one of: run, version")
+    logging.info("No command provided. Use one of: run, version.")
     return 2
 
 
 if __name__ == "__main__":
-    # Allow running as a script for manual testing:
     sys.exit(main())

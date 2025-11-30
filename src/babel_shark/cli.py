@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Babel-Shark Unified CLI (thin wrapper, no logic change)
+Babel-Shark Unified CLI (thin wrapper)
 
 This command-line interface provides a single entry point for all modules
 of the WSI-Babel-Shark pipeline (collect, label, datamatrix, extract, stain, etc.).

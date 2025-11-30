@@ -1,88 +1,55 @@
-# ==============================================================
-# Project metadata for WSI-Babel-Shark
-# --------------------------------------------------------------
-# This file defines build system, dependencies, and project info
-# ==============================================================
-
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "wsi-babel-shark"
 version = "0.1.0"
-description = "Automated whole-slide image metadata extraction pipeline (Babble-Shark)."
-readme = "README.md"
-authors = [
-  { name = "Shahram Aliyari", email = "shahram.aliyari@med.uni-heidelberg.de" },
-  { name = "Cleo-Aron Weis", email = "cleo-aron.weis@med.uni-heidelberg.de" }
-]
+description = "WSI-Babel-Shark: slide label and metadata extraction pipeline"
+requires-python = ">=3.10"
 
-maintainers = [
-  { name = "Cleo-Aron Weis", email = "cleo-aron.weis@med.uni-heidelberg.de" }
-]
-
-license = { text = "MIT" }
-requires-python = ">=3.9"
-
-# --------------------------------------------------------------
-# Main dependencies (minimal working set for core modules)
-# --------------------------------------------------------------
+# Core runtime dependencies for all modules:
+# - collect, label, dm, extract, stain, slideid, db
+# - ROI fallback, OCR engine, layout classifier
 dependencies = [
-  "numpy>=1.24.0",
-  "opencv-python>=4.7.0",
-  "pandas>=2.0.0",
-  "pyyaml>=6.0",
-  "pillow>=10.0",
-  "tqdm>=4.65.0",
-  "pylibdmtx>=0.1.10",
-  "sqlalchemy>=2.0.0",
-  "pytest>=7.4.0",
-  "click>=8.1.0"
+  "numpy",
+  "pandas",
+  "pyyaml",
+  "pillow",
+  "openslide-python",
+  "opencv-python-headless",
+  "pylibdmtx",
+  "easyocr",
+  "reportlab",
+  "tqdm",
+  "rapidfuzz",
+  "openpyxl",
+  "XlsxWriter",
+  "torch",
+  "torchvision",
+  "scikit-learn",
+  "matplotlib",
+  "seaborn"
 ]
 
-# --------------------------------------------------------------
-# Optional dependencies for OCR / advanced features
-# --------------------------------------------------------------
-[project.optional-dependencies]
-ocr = [
-  "easyocr>=1.7.0",
-  "pytesseract>=0.3.10",
-]
-report = [
-  "reportlab>=4.0.0",
-  "fpdf2>=2.7.0"
-]
-
-# --------------------------------------------------------------
-# Command line entry points (optional)
-# --------------------------------------------------------------
 [project.scripts]
-babel-shark = "babel_shark.cli:main"
+# Main unified CLI entrypoint
+babel-shark-cli = "babel_shark.cli:main"
 
-# --------------------------------------------------------------
-# Testing and tool configuration
-# --------------------------------------------------------------
+# Layout classifier CLI entrypoints
+babel-shark-layout = "babel_shark.layout.layout_cli:main"
+layout-cli = "babel_shark.layout.layout_cli:main"
+
+[tool.setuptools]
+# Use src/ as the root directory for Python packages
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Pytest configuration
 [tool.pytest.ini_options]
-addopts = "-q"
-testpaths = ["tests"]
-pythonpath = ["src"]
 markers = [
-  "unit: fast unit tests for core logic",
-  "cli: command-line smoke tests",
-  "integration: multi-module integration tests",
+    "unit: mark fast, isolated unit tests",
+    "cli: mark command-line interface tests"
 ]
-filterwarnings = [
-  "ignore:distutils Version classes are deprecated:DeprecationWarning:pylibdmtx.wrapper",
-]
-
-# --------------------------------------------------------------
-# Optional: Code style and linting (for later)
-# --------------------------------------------------------------
-[tool.black]
-line-length = 88
-target-version = ["py311"]
-
-[tool.isort]
-profile = "black"
-src_paths = ["src", "tests"]
