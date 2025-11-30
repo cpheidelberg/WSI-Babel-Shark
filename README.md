@@ -1,273 +1,205 @@
-#  WSI-Babel-Shark 
+# WSI-Babel-Shark
+
 > Advanced, modular, and fully Dockerized metadata extraction pipeline for digital pathology slides (SVS, NDPI, PNG).  
 > Successor to **WSI-BabelFish**, redesigned and extended at the *Computational Pathology Section, Institute of Pathology, Heidelberg University.*
 
 ---
 
-##  Introduction
+## Introduction
 
 **WSI-Babel-Shark** is a next-generation digital pathology pipeline designed to **automatically extract, decode, and organize metadata** from whole-slide images (WSIs).  
 It provides a fully modular, configuration-driven architecture for laboratories, research groups, and clinical archives that manage large-scale histopathology datasets.
 
 Building on the foundation of **WSI-BabelFish**, Babel-Shark introduces:
-- A unified **CLI and YAML-driven orchestration layer** for reproducible workflows  
-- Integrated **OCR, DataMatrix, and ROI-fallback engines** for resilient metadata recovery  
-- A modular **layout classifier** that automates label segmentation  
-- An optional **ROI-Annotator GUI tool** for manual annotation and model training  
-- Fully **Dockerized deployment**, ensuring consistent results across environments  
-- Native support for **SQLite + CSV registries** for traceable data management  
 
-By combining computer vision, text recognition, and configurable data processing,  
-**Babel-Shark** transforms unstructured slide labels into structured, machine-readable metadata — enabling seamless integration into Laboratory Information Systems (LIS), research databases, and AI-driven pipelines.
+- A unified **CLI and YAML-driven orchestration layer**  
+- Integrated **OCR, DataMatrix, and ROI-fallback engines**  
+- A modular **layout classifier**  
+- Optional **ROI-Annotator GUI**  
+- Fully **Dockerized deployment**  
+- Integrated **SQLite + Excel/CSV registry**  
+
+This pipeline transforms unstructured slide labels into structured metadata and is designed for both research and clinical digital pathology workflows.
 
 ---
 
+## Installation (Non-Docker / Local)
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/cpheidelberg/WSI-Babel-Shark.git
+cd WSI-Babel-Shark
+```
+
+### 2. Create and activate virtual environment
+
+#### Linux/macOS:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+```
+
+#### Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install --upgrade pip
+```
+
+### 3. Install dependencies
+
+```bash
+pip install -e .
+```
+
+### 4. Run pipeline locally
+
+```bash
+babel-shark-cli pipeline run --config ./config/config.yaml
+```
+
+---
 
 ## Key Modules
 
-| Module | Purpose | CLI Command |
-|--------|----------|-------------|
-| `collect` | Collect slides from `watch_dir` into staging folder | `python -m babel_shark.cli collect` |
-| `label` | Crop label/macro regions from WSIs | `python -m babel_shark.cli label` |
-| `dm` | Read and decode DataMatrix codes | `python -m babel_shark.cli dm` |
-| `extract` | ROI-based metadata extraction | `python -m babel_shark.cli extract` |
-| `stain` | Detect stain type (H&E, PAS, Giemsa…) | `python -m babel_shark.cli stain` |
-| `slideid` | Generate and rename final slide IDs | `python -m babel_shark.cli slideid` |
-| `db` | Update SQLite + CSV registry | `python -m babel_shark.cli db` |
-| `pipeline` | Run the full orchestrator | `python -m babel_shark.cli pipeline run` |
+| Module | Purpose | CLI |
+|--------|---------|------|
+| `collect` | Collect slides from watch directory | `babel-shark-cli collect` |
+| `label` | Extract label region | `babel-shark-cli label` |
+| `dm` | Decode DataMatrix | `babel-shark-cli dm` |
+| `extract` | ROI metadata extraction | `babel-shark-cli extract` |
+| `stain` | Stain classification | `babel-shark-cli stain` |
+| `slideid` | Generate SlideID | `babel-shark-cli slideid` |
+| `db` | SQLite/Excel registry | `babel-shark-cli db` |
+| `pipeline` | Full orchestrator | `babel-shark-cli pipeline run` |
 
 ---
 
-## Dockerized Execution
+## Docker Usage
 
-Pull prebuilt Docker image:
+### Pull the image
+
 ```bash
-docker pull bioinfo2026/wsi-babel-shark:1.0.0
+docker pull bioinfo2026/wsi-babel-shark:latest
 ```
 
-Run pipeline directly:
+### Run the pipeline
+
 ```bash
-docker run --rm -v "$PWD":/app -w /app bioinfo2026/wsi-babel-shark:1.0.0   pipeline run --config ./config/config.default.yaml
+docker run --rm   -v /path/to/slides:/slides   -v /path/to/output:/output   -v /path/to/config:/config   bioinfo2026/wsi-babel-shark:latest     pipeline run --config /config/config.docker.yaml
 ```
 
-### Docker Compose (optional)
-```yaml
-services:
-  pipeline:
-    image: bioinfo2026/wsi-babel-shark:1.0.0
-    working_dir: /app
-    volumes:
-      - ./:/app
-    environment:
-      - TZ=Europe/Berlin
-    command: ["--help"]
-```
+### Run individual modules
 
-Run via compose:
 ```bash
-docker compose run --rm pipeline pipeline run --config ./config/config.default.yaml
+docker run --rm -v "/slides" -v "/output" -v "/config"   bioinfo2026/wsi-babel-shark:latest collect run --config /config/config.docker.yaml
 ```
 
 ---
 
-## Layout Classifier (Index Builder)
+## Layout Classifier
 
-The **Layout Classifier** is a CNN-based submodule for automatic *label region detection and layout classification*.  
-It automates the placement of bounding boxes for CaseID, BlockID, and Stain areas — replacing manual ROI definitions.
+The layout classifier automates ROI placement by identifying label structures.
 
-### Steps
+### Build index
 
-#### 1️⃣ Build dataset index
 ```bash
 python -m babel_shark.layout.layout_cli build --config ./config/layout.yaml
 ```
-Generates train/validation file lists.
 
-#### 2️⃣ Train classifier
+### Train
+
 ```bash
 python -m babel_shark.layout.layout_cli learn --config ./config/layout.yaml
 ```
-Trains a lightweight CNN model; output saved to:
-```
-model/index.ndpz
-```
 
-#### 3️⃣ Validate or Predict
+### Predict
+
 ```bash
-python -m babel_shark.layout.layout_cli validate --config ./config/layout.yaml
 python -m babel_shark.layout.layout_cli predict --config ./config/layout.yaml
 ```
 
 ---
 
-##  ROI Annotator App
+## ROI Annotator App
 
-The **ROI Annotator** is a lightweight, cross-platform GUI tool for manually creating *Regions of Interest (ROIs)*.  
-Originally developed as a companion to WSI-Babel-Shark, it’s also suitable for independent annotation tasks.
+Lightweight GUI for manual ROI creation and dataset curation.
 
-### Features
-- Draw rectangular ROIs on `.png`, `.jpeg`, `.tiff`
-- Assign custom labels (e.g., CaseID, PotID, Stain)
-- Save and load annotations as `.json`
-- Export:
-  - **Average Image** (clean)
-  - **Overlay Image** (with boxes)
-- No external dependencies — pure Python (Tkinter + Pillow + NumPy)
-
-### Quick Start
-
-Download prebuilt binaries from the  
-👉 [ROI-Annotator Releases page](https://github.com/Shahram-Bioinfo/ROI-Annotator/releases)
-
-#### Windows
-1. Extract ZIP → `ROI-Annotator.exe`
-2. Run it directly (ignore SmartScreen warning)
-
-#### macOS
-```bash
-xattr -dr com.apple.quarantine "/path/to/ROI-Annotator.app"
-open ROI-Annotator.app
-```
-
-#### Linux
-```bash
-chmod +x ROI-Annotator
-./ROI-Annotator
-```
-
-#### Build from source
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip pyinstaller pillow numpy
-pyinstaller --onefile --windowed ROI.Annotator.py
-```
-
-###  Output
-- `*.json` — ROI coordinates and labels  
-- `*_overlay.png` — annotated visualization for QC  
+Download:  
+https://github.com/Shahram-Bioinfo/ROI-Annotator/releases
 
 ---
 
-##  Pipeline Output Structure
+## Pipeline Output Structure
 
-| Path | Description |
-|------|--------------|
-| `output/<timestamp>/pipeline_*.log` | Log files |
-| `output/slide_metadata.csv` | Master CSV metadata table |
-| `output/*.sqlite` | SQLite registry database |
-| `output/*_results.xlsx` | Intermediate Excel outputs |
-| `data/caseid/<CaseID>/` | Final renamed slides |
-| `docs/figures/babel-shark-pipeline-flow.png` | (Pipeline flowchart placeholder) |
+- `output/<timestamp>/pipeline_*.log`  
+- `output/slide_metadata.xlsx`  
+- `output/WSI-Babel-Shark.sqlite`  
+- `data/caseid/<CaseID>/`  
+- `output/roi_debug/`  
 
 ---
 
-## Typical Workflow
+## Typical Workflow (Local)
 
 ```bash
-# Step 1 – Collect slides
-python -m babel_shark.cli collect --config ./config/config.default.yaml
-
-# Step 2 – Crop labels
-python -m babel_shark.cli label --config ./config/config.default.yaml
-
-# Step 3 – Decode DataMatrix
-python -m babel_shark.cli dm --config ./config/config.default.yaml
-
-# Step 4 – Run stain detection
-python -m babel_shark.cli stain --config ./config/config.default.yaml
-
-# Step 5 – Rename & update registry
-python -m babel_shark.cli slideid --config ./config/config.default.yaml
-
-# Step 6 – Run full pipeline (automated)
-python -m babel_shark.cli pipeline run --config ./config/config.default.yaml
+babel-shark-cli collect run --config ./config/config.yaml
+babel-shark-cli label run --config ./config/config.yaml
+babel-shark-cli dm run --config ./config/config.yaml
+babel-shark-cli extract run --config ./config/config.yaml
+babel-shark-cli stain run --config ./config/config.yaml
+babel-shark-cli slideid run --config ./config/config.yaml
+babel-shark-cli pipeline run --config ./config/config.yaml
 ```
 
 ---
 
-## Flowchart
+## Flowchart Diagram
 
-📘 **Pipeline Overview**
-(placeholder for figure — save your diagram at:  
-`docs/figures/babel-shark-pipeline-flow.png`)
+Place your flowchart in:
 
 ```
-[Collect] → [Label Extractor] → [DataMatrix Reader]
-    ↓                  ↓
- [ROI Annotator] → [Layout Classifier]
-    ↓                  ↓
- [Stain Detector] → [SlideID Creator]
-    ↓
- [CSV + SQLite Registry]
+docs/figures/babel-shark-pipeline-flow.png
+```
+
+Then reference it in README:
+
+```markdown
+![WSI-Babel-Shark pipeline overview](docs/figures/babel-shark-pipeline-flow.png)
 ```
 
 ---
 
-## Citation & Acknowledgment
+## Citation
 
-If you use this tool, please cite:
-
-> Aliyari S, Weis C-A. *WSI-Babel-Shark: Modular Dockerized Metadata Extraction Pipeline for Digital Pathology Slides.*  
-> Computational Pathology Section, Institute of Pathology, Heidelberg University (2025).
+Aliyari S, Wagner M, Weis C-A. **WSI-Babel-Shark: Modular Dockerized Metadata Extraction Pipeline for Digital Pathology Slides.**  
+Computational Pathology Section, Institute of Pathology, Heidelberg University (2025).
 
 ---
-## Authors & Supervision
 
-**Shahram Aliyari**  (First Author)
-Computational Pathology Group, Institute of Pathology Heidelberg
-📧 aliyari.shahram@uni-heidelberg.de
-Project concept, core implementation, and manuscript preparation
+## Authors
 
-**Maximilian Wagner**  (Co-Author)
-Computational Pathology Group, Institute of Pathology Heidelberg
-📧 maximilian.wagner@uni-heidelberg.de
-Contributed to early code development, testing, and documentation
-
-**Dr. Cleo-Aron Weis**  (Supervisor & Corresponding Author)
-Computational Pathology Group, Institute of Pathology Heidelberg
-📧 cleo-aron.weis@uni-heidelberg.de
-Project supervision, conceptual guidance, and critical review
+**Shahram Aliyari** — First Author  
+**Maximilian Wagner** — Co-Author  
+**Dr. Cleo-Aron Weis** — Supervisor  
 
 ---
 
 ## License
-Released under the **MIT License**.
+
+MIT License.
 
 ---
 
-## 🔗 Related Resources
+## Related Tools
 
-- [WSI-BabelFish (original version)](https://github.com/ComputationalPathologyHeidelberg/WSI-BabelFish)  
-- [ROI-Annotator App](https://github.com/Shahram-Bioinfo/ROI-Annotator)  
-- [Docker Hub Image](https://hub.docker.com/r/bioinfo2026/wsi-babel-shark)
-
----
-
-## Repository Structure
-```
-WSI-Babel-Shark/
-├─ config/                → YAML config files
-├─ data/                  → Input slides (test, allslides, caseid)
-├─ docs/figures/          → Documentation figures
-├─ model/                 → Trained layout models
-├─ output/                → Logs, results, registry
-├─ roiset/                → ROI annotator outputs
-├─ src/babel_shark/       → Core source code
-├─ tests/                 → Pytest unit tests
-├─ Dockerfile             → Container build file
-├─ docker-compose.yml     → Compose orchestration
-└─ README.md              → This file
-```
-
----
-
-##  Future Directions
-- GPU-accelerated OCR integration (EasyOCR + MistralOCR hybrid)
-- RESTful microservice deployment via FastAPI
-- Extended stain classifier fine-tuning (ResNet-based)
-- Continuous integration & validation datasets
-
+- ROI-Annotator: https://github.com/Shahram-Bioinfo/ROI-Annotator  
+- WSI-BabelFish: https://github.com/ComputationalPathologyHeidelberg/WSI-BabelFish  
+- Docker Hub: https://hub.docker.com/r/bioinfo2026/wsi-babel-shark  
 ---
 
 *© 2025 Computational Pathology Heidelberg (CPH). All rights reserved.*
