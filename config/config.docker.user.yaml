@@ -1,0 +1,228 @@
+# ============================================================
+# WSI-Babel-Shark — Standard Pipeline Configuration (Docker User/Project)
+# ============================================================
+# This configuration is intended for USER PROJECTS. It assumes:
+#   - Slides are mounted at:      /slides
+#   - Outputs are mounted at:     /output
+#   - User-provided config at:    /config
+#       /config/config.docker.user.yaml
+#       /config/stain_list.json
+#       /config/stain_error_replacements.json
+#       /config/model/        (user's trained layout model)
+#       /config/roiset/       (user's ROI JSON sets)
+# ============================================================
+
+# ------------------------------------------------------------
+# 1. Global Pipeline Options
+# ------------------------------------------------------------
+
+watch_mode: false                # user may switch to false for one-shot runs
+watch_interval_minutes: 1
+log_level: "INFO"
+
+operation_mode: "copy"
+dry_run: false
+timestamp_tag_enabled: true
+
+wsi_types: [".svs", ".ndpi", ".tif", ".tiff", ".scn", ".mrxs", ".bif", ".png", ".jpg", ".jpeg"]
+
+# ------------------------------------------------------------
+# 2. Core Paths (Docker-Friendly)
+# ------------------------------------------------------------
+
+watch_dir: "/slides"
+staging_dir: "/output/staging"
+
+failed_output_dir: "/output/caseid/failed"
+
+final_output_dir: "/output/caseid"
+final_slide_index_xlsx: "/output/final_slide_ids.xlsx"
+
+slide_id_generator:
+  final_output_dir: "/output/caseid"
+  failed_output_dir: "/output/caseid/failed"
+  final_slide_index_xlsx: "/output/final_slide_ids.xlsx"
+
+run_output_dir: "/output"
+metadata_excel_path: "/output/slide_metadata.xlsx"
+
+label_root_dir: "/output/labels"
+
+sqlite_db_path: "/output/WSI-Babel-Shark.sqlite"
+ops_table: "WSI_Babel_Shark_ops"
+
+# ------------------------------------------------------------
+# 3. DLL / Platform Settings (Windows only, ignored in Docker)
+# ------------------------------------------------------------
+openslide_dll: ""
+
+# ------------------------------------------------------------
+# 4. Child Script Paths (Used by runner.py inside container)
+# ------------------------------------------------------------
+
+scripts:
+  label_extractor: "/app/src/babel_shark/label_extractor.py"
+  datamatrix_reader: "/app/src/babel_shark/datamatrix_reader.py"
+  roi_metadata_extractor: "/app/src/babel_shark/roi_metadata_extractor.py"
+  stain_extractor: "/app/src/babel_shark/stain_extractor.py"
+  slide_id_creator: "/app/src/babel_shark/slide_id_generator.py"
+  sqlite_table_generator: "/app/src/babel_shark/database_manager.py"
+
+# ------------------------------------------------------------
+# 5. Label Extraction & Imaging Parameters
+# ------------------------------------------------------------
+
+label_crop_ratio: 0.30
+label_rotation_degrees: -90
+wsi_macro_img_tag: "macro"
+
+# ------------------------------------------------------------
+# 6. Stain Dictionaries (User-Provided)
+# ------------------------------------------------------------
+# Here we assume the user provides stain JSONs under /config.
+
+stain_list_path: "/config/stain_list.json"
+stain_replace_map_path: "/config/stain_error_replacements.json"
+
+# ------------------------------------------------------------
+# 7. ROI Metadata Extractor (User-Provided Model + ROI Sets)
+# ------------------------------------------------------------
+
+roiset_selector:
+  layout_model:
+    backend: "resnet-open-set"
+    model_dir: "/config/model"        # USER'S MODEL directory
+    params:
+      low_conf_gate: 0.90
+      candidate_min: 0.91
+  roiset_root: "/config/roiset"       # USER'S ROI JSON sets
+  strict_dynamic: true
+
+# OPTIONAL static ROI override for user:
+# ROI_set_file: "/config/roi_layout.user.json"
+
+# ------------------------------------------------------------
+# 8. ROI / Imaging Settings
+# ------------------------------------------------------------
+
+pxl_offset: 8
+roi_pxl_offset: 12
+
+roi_debug_dir: "/output/roi_debug"
+debug_parts_root: "/output/roi_debug_parts"
+
+allowed_labid_letters:
+  - "E"
+  - "R"
+
+# ------------------------------------------------------------
+# 9. OCR Settings
+# ------------------------------------------------------------
+
+ocr_langs: ["en"]
+ocr_min_conf: 0.25
+ocr_text_threshold: 0.7
+ocr_ycenter_ths: 0.5
+ocr_slope_ths: 0.1
+ocr_paragraph: false
+
+save_ocr_inputs: false
+
+# ------------------------------------------------------------
+# 10. OCR Preprocessing
+# ------------------------------------------------------------
+
+ocr_preprocess:
+  clahe: true
+  clahe_clip: 2.0
+  clahe_grid: 8
+  sharpen: true
+  sharpen_strength: 1.2
+
+# ------------------------------------------------------------
+# 11. Registration & Reference Images
+# ------------------------------------------------------------
+
+registration:
+  enabled: false
+  method: "SIFT"
+  sift_nfeatures: 4000
+  sift_ratio: 0.75
+  max_features: 2000
+  good_match_ratio: 0.25
+
+classifier_strip:
+  enabled: false
+  side: "left"
+  fraction: 0.32
+
+label_strip:
+  enabled: false
+  side: "left"
+  fraction: 0.32
+
+group_ref_image_pattern: "{group}.png"
+use_group_ref_image_size: true
+use_group_ref_as_registration: false
+resize_to_ref: false
+
+# ------------------------------------------------------------
+# 12. Extraction Rules for OCR Text
+# ------------------------------------------------------------
+
+extraction_rules:
+  Section:
+    allowed_chars: "0123456789"
+    replacement_patterns:
+      - ["[^0-9]", ""]
+      - ["^\\s+|\\s+$", ""]
+    default_value: "1"
+
+  Casenumber:
+    allowed_chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/ "
+    replacement_patterns:
+      - ["[\\\\/_\\-]", "/"]
+      - ["\\s+", " "]
+      - ["O", "0"]
+      - ["I", "1"]
+      - ["l", "1"]
+      - ["^\\s+|\\s+$", ""]
+    default_value: null
+
+  Pot-BlockID:
+    allowed_chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
+    replacement_patterns:
+      - ["\\s+", " "]
+      - ["[^A-Z0-9 ]", ""]
+      - ["^\\s+|\\s+$", ""]
+    default_value: null
+
+  Stain:
+    replacement_patterns: []
+    default_value: null
+
+# ------------------------------------------------------------
+# 13. SQLite Normalization
+# ------------------------------------------------------------
+
+sqlite:
+  db_path: "/output/WSI-Babel-Shark.sqlite"
+  sqlite_source_table: "slides_raw"
+  sqlite_clean_table: "normalized_slides"
+  scanner_name_map:
+    test: "labtest"
+
+# ------------------------------------------------------------
+# 14. Runtime-Injected Keys (Do NOT set manually)
+# ------------------------------------------------------------
+#   run_timestamp
+#   output_run_dir
+#   label_crops_dir
+#   datamatrix_output_excel
+#   stain_output_excel
+#   stain_output_pdf
+#   datamatrix_failed_folder
+#   fallback_failed_folder
+# ============================================================
+# End of Docker USER/PROJECT config
+# ============================================================

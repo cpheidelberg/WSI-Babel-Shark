@@ -200,6 +200,4 @@ MIT License.
 - ROI-Annotator: https://github.com/Shahram-Bioinfo/ROI-Annotator  
 - WSI-BabelFish: https://github.com/ComputationalPathologyHeidelberg/WSI-BabelFish  
 - Docker Hub: https://hub.docker.com/r/bioinfo2026/wsi-babel-shark  
----
 
-*© 2025 Computational Pathology Heidelberg (CPH). All rights reserved.*

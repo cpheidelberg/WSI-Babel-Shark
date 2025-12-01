@@ -1,7 +1,7 @@
 # Step 1: Lightweight Python base image
 FROM python:3.12-slim
 
-# Step 2: System dependencies for OpenSlide, OpenCV, Tesseract, etc.
+# Step 2: System dependencies for OpenSlide, OpenCV, Tesseract, DataMatrix, etc.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
@@ -13,6 +13,8 @@ RUN apt-get update && \
         openslide-tools \
         libopenslide0 \
         tesseract-ocr \
+        libdmtx0t64 \
+        libdmtx-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Step 3: Python runtime settings
@@ -72,10 +74,10 @@ RUN mkdir -p /data/input /data/output /config && \
 # Step 9: Switch to non-root user
 USER babelshark
 
-# Step 10: Runtime working directory (host volumes will be mounted here)
+# Step 10: Runtime working directory (host volumes may be mounted here if desired)
 WORKDIR /data
 
-# Step 11: Default config path (can be overridden by CLI or ENV)
+# Step 11: Default config path (not mandatory, just convenience)
 ENV BABEL_SHARK_CONFIG=/config/config.docker.yaml
 
 # Step 12: Entrypoint – unified CLI
