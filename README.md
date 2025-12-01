@@ -212,7 +212,7 @@ babel-shark-cli pipeline run --config ./config/config.yaml
 
 ---
 
-## Citation (Vancouver Style)
+## Citation 
 
 Aliyari S, Wagner M, Weis C-A.  
 **WSI-Babel-Shark: A modular pipeline for robust metadata extraction from heterogeneous whole-slide image labels in digital pathology.**  
