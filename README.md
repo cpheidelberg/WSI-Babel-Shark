@@ -20,6 +20,8 @@ Developed at the **Computational Pathology Section, Institute of Pathology, Heid
 
 The objective is to transform unstructured slide labels into **clean, queryable, machine-readable metadata**, enabling large-scale digital pathology research, automation, and archive digitization.
 
+![WSI-Babel-Shark pipeline overview](docs/figures/babel-shark-pipeline-flow.png)
+
 ---
 
 ## Features
