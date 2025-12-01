@@ -1,8 +1,5 @@
 # WSI-Babel-Shark  
 A modular, Dockerized, and configuration-driven pipeline for robust metadata extraction from whole-slide images (WSIs)
-
-![WSI-Babel-Shark Banner](docs/figures/banner.png)
-
 ---
 
 ## Overview
