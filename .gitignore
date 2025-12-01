@@ -23,14 +23,20 @@ output/**              # logs, csv, sqlite, xlsx (pipeline products)
 data/**                # raw slides & derived copies
 !data/.gitkeep         # keep folder structure only
 
-# Large slide formats
-*.svs
-*.ndpi
-*.tif
-*.tiff
-*.png
-*.jpg
-*.jpeg
+# Large slide formats – ignore only inside data/ (WSIs, derived images)
+data/**/*.svs
+data/**/*.ndpi
+data/**/*.tif
+data/**/*.tiff
+data/**/*.png
+data/**/*.jpg
+data/**/*.jpeg
+
+# Allow documentation figures
+!docs/figures/*.png
+!docs/figures/*.jpg
+!docs/figures/*.jpeg
+
 
 # Models & ROI sets (if you don’t want to track them)
 model/**
