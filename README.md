@@ -1,7 +1,6 @@
 ![WSI-Babel-Shark pipeline overview](docs/figures/banner1.png)
 # WSI-Babel-Shark  
 
-
 ## Overview
 
 **WSI-Babel-Shark** is an advanced, next-generation digital pathology pipeline designed to extract, decode, and structure metadata from heterogeneous whole-slide image (WSI) labels.  
@@ -20,6 +19,11 @@ Developed at the **Computational Pathology Section, Institute of Pathology, Heid
 
 The objective is to transform unstructured slide labels into **clean, queryable, machine-readable metadata**, enabling large-scale digital pathology research, automation, and archive digitization.
 
+##  Pipeline Overview
+
+The following diagram illustrates the complete WSI-Babel-Shark workflow  
+—from slide ingestion to metadata extraction, ROI/OCR fallback, stain detection,  
+and final SlideID generation:
 ![WSI-Babel-Shark pipeline overview](docs/figures/babel-shark-pipeline-flow.png)
 
 ---
@@ -41,8 +45,6 @@ The objective is to transform unstructured slide labels into **clean, queryable,
 ---
 
 ## Pipeline Architecture
-
-![WSI-Babel-Shark Flowchart](docs/figures/babel-shark-flow.png)
 
 Core modules:
 
