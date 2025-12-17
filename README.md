@@ -226,11 +226,11 @@ Computational Pathology Section, Institute of Pathology, Heidelberg University; 
 
 ## Authors
 
-**Shahram Aliyari** — First Author & Lead Developer  
+**Shahram Aliyari** — First Author & Corresponding Author
 **Maximilian Wagner** — Co-Author  
-**Prof. Cleo-Aron Weis** — Senior & Corresponding Author  
+**Prof. Cleo-Aron Weis** — Senior 
 
-Contact: cleo-aron.weis@uni-heidelberg.de
+Contact: shahram.aliyari@med.uni-heidelberg.de
 
 ---
 
