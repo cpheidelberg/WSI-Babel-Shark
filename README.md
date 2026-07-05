@@ -194,7 +194,7 @@ This hybrid approach provides robust recognition across diverse scanner vendors 
 A standalone graphical application is provided for users without programming experience.
 
 <p align="center">
-  <img src="docs/classifier.jpeg" width="900" alt="Label Layout Classifier GUI">
+  <img src="docs/classifie.jpeg" width="900" alt="Label Layout Classifier GUI">
 </p>
 
 The GUI provides a complete workflow for training, validating and using the classifier, including:
