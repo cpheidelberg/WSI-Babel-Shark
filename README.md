@@ -174,40 +174,52 @@ output/
 
 ## Label Layout Classifier
 
-WSI-Babel-Shark includes a dedicated **Label Layout Classifier** for recognizing heterogeneous slide-label layouts before ROI-based OCR. The classifier assigns each label image to a predefined layout group (G1–G10) and enables automatic selection of the corresponding ROI template.
+WSI-Babel-Shark includes a dedicated **Label Layout Classifier** for automatic recognition of heterogeneous whole-slide image label layouts before ROI-based OCR. The classifier assigns each label image to one of the predefined layout groups (G1–G10), enabling automatic selection of the appropriate ROI template for downstream metadata extraction.
 
-The classifier is implemented as a prototype-based open-set recognition tool using:
+Unlike conventional closed-set classifiers, the system uses an **open-set recognition** strategy, allowing previously unseen or non-standard label layouts to be rejected instead of being incorrectly assigned to an existing class.
 
-- ResNet-18 feature embeddings
-- handcrafted layout descriptors
-- average-image similarity
-- threshold-based unknown-layout rejection
+The classifier combines multiple complementary features:
 
-This allows WSI-Babel-Shark to classify known label formats while rejecting unseen or non-standard layouts.
+- ResNet-18 CNN feature embeddings
+- Handcrafted layout descriptors
+- Average-image similarity
+- Threshold-based unknown-layout rejection
 
-### Graphical Classifier Tool
+This hybrid approach provides robust recognition across diverse scanner vendors and label designs while maintaining reliable rejection of unfamiliar layouts.
 
-A standalone graphical tool is available for non-programming users:
+---
 
-**Label Layout Classifier GUI:**  
+### Graphical User Interface (GUI)
+
+A standalone graphical application is provided for users without programming experience.
+
+<p align="center">
+  <img src="docs/4.jpg" width="900" alt="Label Layout Classifier GUI">
+</p>
+
+The GUI provides a complete workflow for training, validating and using the classifier, including:
+
+- Dataset splitting
+- Feature index generation
+- Automatic threshold learning
+- Validation
+- Single-image prediction
+- Batch prediction
+- Batch evaluation
+- Confusion matrix generation
+- Excel report generation
+- Configuration editor
+- Portable Windows execution (no Python installation required)
+
+Repository:
+
 https://github.com/cpheidelberg/label-layout-classifier
 
-The GUI supports:
-
-- dataset splitting
-- building classifier indices
-- learning thresholds
-- validating classifier performance
-- single-image prediction
-- batch prediction
-- batch evaluation
-- confusion matrix and Excel report generation
-- configuration editing
-- portable Windows execution without manual Python setup
+---
 
 ### Portable Windows Release
 
-A pre-built Windows version is available from:
+A pre-built standalone Windows version is available from:
 
 https://github.com/cpheidelberg/label-layout-classifier/releases/latest
 
@@ -215,6 +227,27 @@ Download:
 
 ```text
 BabelShark-Full-Windows.zip
+```
+
+After extracting the archive, simply run:
+
+```text
+BabelShark-Full.exe
+```
+
+No Python installation or additional dependencies are required.
+
+---
+
+### Typical Workflow
+
+1. Prepare a labeled training dataset.
+2. Build the feature index.
+3. Learn the optimal acceptance thresholds.
+4. Validate classifier performance.
+5. Predict the layout of individual images or entire folders.
+6. Evaluate the classifier and generate performance reports.
+
 
 ## ROI-Annotator GUI
 
@@ -237,7 +270,7 @@ babel-shark-cli slideid run --config ./config/config.yaml
 babel-shark-cli pipeline run --config ./config/config.yaml
 ```
 
----
+
 
 ## Citation 
 
