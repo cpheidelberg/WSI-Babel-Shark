@@ -194,7 +194,7 @@ This hybrid approach provides robust recognition across diverse scanner vendors 
 A standalone graphical application is provided for users without programming experience.
 
 <p align="center">
-  <img src="docs/4.jpg" width="900" alt="Label Layout Classifier GUI">
+  <img src="docs/classifier.jpeg" width="900" alt="Label Layout Classifier GUI">
 </p>
 
 The GUI provides a complete workflow for training, validating and using the classifier, including:
@@ -248,7 +248,7 @@ No Python installation or additional dependencies are required.
 5. Predict the layout of individual images or entire folders.
 6. Evaluate the classifier and generate performance reports.
 
-
+---
 ## ROI-Annotator GUI
 
 A lightweight cross-platform GUI for manual ROI creation and dataset curation.
