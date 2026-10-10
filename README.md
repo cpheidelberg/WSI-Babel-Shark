@@ -272,23 +272,34 @@ babel-shark-cli pipeline run --config ./config/config.yaml
 
 
 
-## Citation 
+## Citation
 
-Aliyari S, Wagner M, Weis C-A.  
-**WSI-Babel-Shark: A modular pipeline for robust metadata extraction from heterogeneous whole-slide image labels in digital pathology.**  
-Computational Pathology Section, Institute of Pathology, Heidelberg University; 2026.
+If you use **WSI-Babel-Shark** in your research, please cite the following peer-reviewed publication:
 
----
+Aliyari S, Legnar M, Blattgerste C, Jessen A, Balakrishnan BTS, Kaib PSJ, Sementsov M, Schwab C, Weis C-A. (2026).
+
+**WSI-Babel-Shark: A modular pipeline for robust metadata extraction from heterogeneous whole-slide image labels in digital pathology.**
+
+*Journal of Pathology Informatics.*
+
+**DOI:** https://doi.org/10.1016/j.jpi.2026.100722
+
+**Software repository:** https://github.com/cpheidelberg/WSI-Babel-Shark
+
+This article is published Open Access under the Creative Commons Attribution 4.0 International (CC BY 4.0) license.
 
 ## Authors
 
-**Shahram Aliyari** — First Author & Corresponding Author
-**Maximilian Wagner** — Co-Author  
-**Prof. Cleo-Aron Weis** — Senior 
+**Publication Authors**
 
-Contact: shahram.aliyari@med.uni-heidelberg.de
+Shahram Aliyari, Maximilian Legnar, Christoph Blattgerste, Ayk Jessen, Balamurugan Thirukonda Subramanian Balakrishnan, Philip S.J. Kaib, Mark Sementsov, Constantin Schwab, and Cleo-Aron Weis.
 
----
+**Software Development & Maintenance**
+
+Shahram Aliyari — First Author & Corresponding Author
+Prof. Dr. Cleo-Aron Weis — Senior Author: 
+
+**Contact:** shahram.aliyari@med.uni-heidelberg.de
 
 ## License
 MIT License.
